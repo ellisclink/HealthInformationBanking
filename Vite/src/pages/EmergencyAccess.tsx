@@ -110,7 +110,7 @@ function EmergencyAccess() {
           {info.allergies && (
             <>
               <h4>Allergies</h4>
-              {info.allergies.length ? <ul>{info.allergies.map((a, i) => <li key={i}>{a.allergen}{a.reaction && ` — ${a.reaction}`}{a.severity && ` (${a.severity})`}</li>)}</ul>
+              {info.allergies.length ? <ul>{info.allergies.map((a, i) => <li key={i}>{a.allergen}{a.reaction && ` — ${a.reaction}`}{a.severity && ` (${a.severity.replace("life_threatening", "life-threatening").replace(/_/g, " ")})`}</li>)}</ul>
                 : <p>{info.no_known_allergies ? "No known allergies" : "None recorded"}</p>}
             </>
           )}
