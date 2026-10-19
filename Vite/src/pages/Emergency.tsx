@@ -89,8 +89,9 @@ function Emergency() {
 
         <section className="settings-card">
           <h3>Emergency code</h3>
+          <p>Status: <strong>{data.settings.enabled ? "On, responders can open it with the code" : "Off, codes will not work"}</strong></p>
           <label className="toggle-row">
-            <span>Emergency access is on</span>
+            <span>Turn on emergency access</span>
             <input type="checkbox" checked={form.enabled} onChange={(e) => set("enabled", e.target.checked)} />
           </label>
           {data.access.has_code ? (
@@ -104,7 +105,7 @@ function Emergency() {
           ) : (
             <button className="primary-button" type="button" disabled={busy} onClick={newCode}>Create emergency code</button>
           )}
-          <p><small className="form-hint">Remember to tick “on” and press Save below, access stays off until you do.</small></p>
+          <p><small className="form-hint">Tick “Turn on emergency access” and press Save below. Access stays off until you do.</small></p>
         </section>
 
         <section className="settings-card">
