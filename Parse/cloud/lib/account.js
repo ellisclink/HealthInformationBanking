@@ -145,8 +145,8 @@ async function requestDeletion(body, user, ctx) {
   const req = await create("DeletionRequest", { user_id: user.user_id, status: "pending", requested_at: now, scheduled_for: new Date(now.getTime() + GRACE_DAYS * DAY), immediate: false });
   await audit({ userId: user.user_id, event: "ACCOUNT_DELETE_SCHEDULED", targetClass: "DeletionRequest", targetId: req.id, ip: ctx.ip });
   try {
-    await sec.sendEmail(user.user_email, "Your MIB account is scheduled for deletion",
-      `Your MIB account and all of its data will be permanently deleted on ${req.get("scheduled_for").toISOString().slice(0, 10)}.\n`
+    await sec.sendEmail(user.user_email, "Your Health Information Banking account is scheduled for deletion",
+      `Your Health Information Banking account and all of its data will be permanently deleted on ${req.get("scheduled_for").toISOString().slice(0, 10)}.\n`
       + "To keep it, log in before then and cancel the deletion. If you didn't ask for this, log in and cancel it now, then change your password.", "deletion notice");
   } catch (err) { console.error("deletion email failed:", err && err.message ? err.message : "error"); }
   return { status: 201, ...requestView(req), message: `Your account will be deleted in ${GRACE_DAYS} days. You can cancel until then.`, export_recommended: true };
