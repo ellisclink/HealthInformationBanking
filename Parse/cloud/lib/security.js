@@ -115,8 +115,6 @@ function isValidNpi(npi) {
 // Set SMTP_USER + SMTP_PASS (a Gmail app password works) in the Back4app environment
 // variables to send real emails. Without them, codes are written to the Cloud Code logs,
 // and with MIB_SHOW_CODES=true they're also shown on screen (demo only — never with real users).
-process.env.SMTP_USER = "healthinformationbanking@gmail.com"
-process.env.SMTP_PASS = "app_password"
 const DEV_MODE = !process.env.SMTP_USER || !process.env.SMTP_PASS;
 let transporter = null;
 function mailer() {
