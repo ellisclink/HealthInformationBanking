@@ -189,7 +189,7 @@ async function summary(body, user, ctx) {
   }
 
   out.worth_raising = flags;
-  out.disclaimer = "This summary lists what you have recorded in MIB. It is not medical advice or a diagnosis.";
+  out.disclaimer = "This summary lists what you have recorded in Health Information Banking. It is not medical advice or a diagnosis.";
   out.text = renderText(out);
   await audit({ userId: user.user_id, event: "PREVISIT_SUMMARY", newData: { days, sections: sel.list, has_visit: !!visit, questions: questions.length }, ip: ctx && ctx.ip });
   return { status: 200, summary: out };
