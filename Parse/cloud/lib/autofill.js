@@ -55,7 +55,8 @@ const EDITABLE = {
 // Replaceable so tests (and a future OCR service) can supply their own reader: async (Buffer) -> string
 let extractor = async (buf) => {
   const pdfParse = require("pdf-parse/lib/pdf-parse.js");   // not the package index, which runs a debug routine
-  const out = await pdfParse(buf);
+  // pass a plain Uint8Array: on newer Node versions pdf.js rejects a Buffer with "bad XRef entry"
+  const out = await pdfParse(new Uint8Array(buf));
   return out.text || "";
 };
 const setExtractor = (fn) => { extractor = fn; };
