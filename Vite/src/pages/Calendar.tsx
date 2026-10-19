@@ -5,7 +5,7 @@ import { api, localDate } from "../api";
 // The calendar feed is served by the backend (Parse/cloud/app.js), not by the website. On Back4app set
 // VITE_FEED_BASE_URL to the backend's web address (App Settings > Domains, e.g. https://yourapp.b4a.app).
 // Locally the website and the feed share one server, so the page's own address works.
-const FEED_BASE = (import.meta.env.VITE_FEED_BASE_URL || window.location.origin).replace(/\/+$/, "");
+const FEED_BASE = (String(import.meta.env.VITE_FEED_BASE_URL || "").trim() || window.location.origin).replace(/\/+$/, "");
 
 // Calendar: appointments, reminders and other events, including repeating ones.
 //   GET    /calendar/events?startDate=&endDate=&timeZone=  -> { events } (a repeating event comes back once per occurrence)
