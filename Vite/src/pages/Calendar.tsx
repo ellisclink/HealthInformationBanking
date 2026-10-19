@@ -2,6 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import NavigationBar from "../components/NavigationBar";
 import { api, localDate } from "../api";
 
+// The calendar feed is served by the backend (Parse/cloud/app.js), not by the website. On Back4app set
+// VITE_FEED_BASE_URL to the backend's web address (App Settings > Domains, e.g. https://yourapp.b4a.app).
+// Locally the website and the feed share one server, so the page's own address works.
+const FEED_BASE = (import.meta.env.VITE_FEED_BASE_URL || window.location.origin).replace(/\/+$/, "");
+
 // Calendar: appointments, reminders and other events, including repeating ones.
 //   GET    /calendar/events?startDate=&endDate=&timeZone=  -> { events } (a repeating event comes back once per occurrence)
 //   GET    /calendar/upcoming?limit=&timeZone=             -> { events } (the next occurrences)
@@ -222,7 +227,7 @@ function SubscribeLinks() {
       const body: { token_hash: string; days: number; label?: string } = { token_hash: secret.hash, days: Number(days) };
       if (name.trim()) body.label = name.trim();
       const r = await api<NewFeedReply>("/calendar/feed-tokens", { method: "POST", body: JSON.stringify(body) });
-      setNewLink({ url: `${window.location.origin}/calendar/feed/${secret.token}`, expires: r.expires_at });
+      setNewLink({ url: `${FEED_BASE}/calendar/feed/${secret.token}`, expires: r.expires_at });
       setName("");
     } catch (e) { setError((e as Error).message); setBusy(false); return; }
     try { await load(); } catch (e) { setError(`The link was made, but the list could not refresh: ${(e as Error).message}`); }
