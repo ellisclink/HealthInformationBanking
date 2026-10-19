@@ -1,0 +1,10 @@
+{
+  "name": "mib-cloud-code",
+  "private": true,
+  "description": "Back4app Cloud Code for Medical Information Banking",
+  "dependencies": {
+    "camaro": "^6.7.3",
+    "nodemailer": "^6.9.16",
+    "pdf-parse": "^1.1.1"
+  }
+}

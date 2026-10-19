@@ -1,0 +1,17 @@
+node_modules
+package-lock.json
+package.json
+**/.DS_Store
+# Package manifests are needed so teammates can `npm install` the right versions
+!Vite/package.json
+!Vite/package-lock.json
+# Parse
+!Parse/cloud/package.json
+!Parse/local/package.json
+!Parse/local/package-lock.json
+Parse/local/logs/
+
+# Local process notes (not part of the project)
+.workflow/
+docs/superpowers/
+logs/

@@ -1,0 +1,16 @@
+{
+  "name": "mib-local-parse",
+  "private": true,
+  "description": "Runs the MIB Cloud Code on a local Parse Server for development",
+  "scripts": {
+    "start": "node local-server.js",
+    "seed": "node seed-local.js"
+  },
+  "dependencies": {
+    "camaro": "^6.7.3",
+    "express": "^4.21.2",
+    "nodemailer": "^6.10.1",
+    "parse": "^5.3.0",
+    "parse-server": "^7.5.4"
+  }
+}
