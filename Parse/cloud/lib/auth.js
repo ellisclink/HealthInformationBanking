@@ -118,7 +118,7 @@ async function login(body, ctx) {
     user_id: user.id, code_hash: sec.hashCode(code), attempts: 0,
     expires_at: new Date(Date.now() + CODE_TTL_MIN * 60000),
   });
-  await sec.sendEmail(cleanEmail, "Your MIB verification code",
+  await sec.sendEmail(cleanEmail, "Your Health Information Banking verification code",
     `Your verification code is ${code}. It expires in ${CODE_TTL_MIN} minutes.\nIf you didn't try to log in, you can ignore this email.`,
     "2FA code");
   await audit({ userId: user.id, event: "login_password_ok", ip: ctx.ip });
@@ -195,7 +195,7 @@ async function forget(body, ctx) {
   await destroyAll(await findAll("PasswordReset", { user_id: user.id }));
   const code = sec.newResetCode();
   await create("PasswordReset", { user_id: user.id, token_hash: sec.sha256(code), expires_at: new Date(Date.now() + RESET_TTL_MIN * 60000) });
-  await sec.sendEmail(cleanEmail, "Reset your MIB password",
+  await sec.sendEmail(cleanEmail, "Reset your Health Information Banking password",
     `Your password reset code is ${code}. It expires in ${RESET_TTL_MIN} minutes.\nIf you didn't ask to reset your password, you can ignore this email.`,
     "password reset code");
   await audit({ userId: user.id, event: "password_reset_requested", ip: ctx.ip });
