@@ -30,6 +30,7 @@ const vitals = require("./vitals");
 const records = require("./records");
 const safety = require("./safety");
 const { LAB_TESTS } = require("./reference");
+const { isKnownDrug, isSupplement, unitKind, compareMedicines } = require("./drugnames");
 const { isId, isDate, findAll, getOwned, save, create, destroy, destroyAll, audit, fail } = require("./db");
 
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
@@ -88,6 +89,8 @@ const DATE_RE = "(\\d{4}-\\d{2}-\\d{2}|\\d{1,2}/\\d{1,2}/\\d{2,4}|[A-Za-z]{3,9}\
 // ---------- section headings ----------
 const HEADINGS = [
   ["medications", /^(current |home |active |discharge )?(medications?|meds|prescriptions?|medication list)\b\s*:?/i],
+  // vitamins and supplements are medicines too (saved as non-prescription); never lab results
+  ["supplements", /^(vitamins?( (and|&) (supplements?|minerals?))?|supplements?|over[- ]the[- ]counter( medications?| meds)?|otc( medications?| meds)?|herbal( products?| supplements?)?|nutritional supplements?)\b\s*:?/i, true],
   ["allergies", /^(drug |known )?allergies( and (reactions|intolerances))?\b\s*:?/i],
   ["conditions", /^(diagnos[ie]s|problem list|active problems|assessment|impression|medical history|past medical history|conditions)\b\s*:?/i],
   ["vitals", /^(vital signs?|vitals)\b\s*:?/i],
@@ -96,17 +99,29 @@ const HEADINGS = [
 ];
 const headingOf = (line) => {
   if (line.length > 80) return null;
-  for (const [name, re] of HEADINGS) { const m = line.match(re); if (m) return { name, rest: clean(line.slice(m[0].length)) }; }
+  for (const [name, re, strict] of HEADINGS) {
+    const m = line.match(re);
+    if (!m) continue;
+    // a "strict" heading must stand alone or end in a colon: "Vitamin D3 2000 IU" is a medicine line, not the heading "Vitamins"
+    if (strict && /\S/.test(line.slice(m[0].length)) && !m[0].includes(":")) continue;
+    return { name, rest: clean(line.slice(m[0].length)) };
+  }
   return null;
 };
 // lines grouped by the heading above them ("allergies: penicillin" keeps the text after the colon as the first line)
 function sectionLines(lines) {
-  const out = { medications: [], allergies: [], conditions: [], vitals: [], labs: [], other: [], none: [] };
+  const out = { medications: [], supplements: [], allergies: [], conditions: [], vitals: [], labs: [], other: [], none: [] };
+  for (const { line, section } of taggedLines(lines)) out[section].push(line);
+  return out;
+}
+// every line with the heading it sits under: [{ line, section }] (the heading lines themselves are left out)
+function taggedLines(lines) {
+  const out = [];
   let current = "none";
   for (const line of lines) {
     const h = headingOf(line);
-    if (h) { current = h.name; if (h.rest) out[current].push(h.rest); continue; }
-    out[current].push(line);
+    if (h) { current = h.name; if (h.rest) out.push({ line: h.rest, section: current }); continue; }
+    out.push({ line, section: current });
   }
   return out;
 }
@@ -153,19 +168,29 @@ const labTerms = (() => {
 const UNIT_RE = "([A-Za-z%µμ][A-Za-z0-9%µμ/^.*]{0,14}(?:/[A-Za-z0-9µμ.]{1,8})?)";
 
 // "Glucose 105 mg/dL 70 - 99 H"  ->  proposal, or null when the line isn't a result
-function labFromLine(line, fallbackDate) {
+// A lab result is a concentration ("32 ng/mL"); a medicine or supplement is a dose ("2000 IU", "500 mg"). Several names are both
+// ("vitamin d", "calcium", "iron", "potassium", "b12"), so the UNIT and the heading decide which one a line is (Task 8-2).
+function labFromLine(line, fallbackDate, section = "none") {
+  // under a medicine / supplement / allergy / condition heading a line is never a lab result
+  if (["medications", "supplements", "allergies", "conditions"].includes(section)) return null;
   const lower = line.toLowerCase();
   for (const { test, re } of labTerms) {
     const m = re.exec(lower);
     if (!m || m.index > 40) continue;
     const rest = line.slice(m.index + m[0].length);
-    const v = rest.match(new RegExp(`^[\\s:.\\-=]*([<>]?\\s*-?\\d{1,5}(?:[.,]\\d{1,4})?)\\s*${UNIT_RE}?`));
+    // between the name and the number a report may add a qualifier: "Vitamin D, 25-OH 32 ng/mL", "Cholesterol, total 190 mg/dL"
+    const v = rest.match(new RegExp(`^[\\s:.\\-=,]*(?:\\(?(?:25[\\s-]?(?:oh|hydroxy)(?:[\\s-]?vitamin d)?|total|serum|plasma|whole blood|fasting|calculated)\\)?[\\s:.\\-=,]*)?([<>]?\\s*-?\\d{1,5}(?:[.,]\\d{1,4})?)\\s*${UNIT_RE}?`, "i"));
     if (!v) continue;
     const value = num(v[1].replace(/[<>\s]/g, ""));
     if (value === null) continue;
     let unit = v[2] && !/^(h|l|hh|ll|high|low|normal|abnormal|flag)$/i.test(v[2]) ? v[2] : null;
     const tail = rest.slice(v[0].length);
     const range = tail.match(/(-?\d{1,5}(?:\.\d+)?)\s*(?:-|–|to)\s*(-?\d{1,5}(?:\.\d+)?)/);
+    const kind = unitKind(unit);
+    if (kind === "dose") continue;                                   // "Vitamin D3 2000 IU", "Calcium 600 mg": a dose, not a result
+    const flagged = /(^|\s)(H|L|HH|LL|high|low|abnormal|critical)(\s|$)/i.test(tail);
+    // outside a results section, a result needs a lab-style unit (mg/dL, ng/mL...) or a reference range or flag next to it
+    if (section !== "labs" && kind !== "lab" && !(kind === "none" && (range || flagged))) continue;
     const warnings = [];
     if (/^[<>]/.test(v[1].trim())) warnings.push("The report shows a limit (< or >), not an exact number");
     if (!unit) { unit = test.default_unit; warnings.push(`No unit found; assumed ${test.default_unit}`); }
@@ -195,24 +220,39 @@ const ROUTES = [["oral", /\b(by mouth|oral|po)\b/i], ["topical", /\btopical\b/i]
   ["sublingual", /\bsublingual\b/i], ["transdermal", /\btransdermal\b/i]];
 
 // "Lisinopril 10 mg tablet once daily"  ->  proposal, or null
-function medFromLine(raw) {
+// opts.section: the heading the line sits under ("medications", "supplements", or "none"/"other" for a line found elsewhere).
+// Outside a medicine heading a line only counts when the name is a medicine or supplement we recognise (drugnames.js).
+const UNIT_NAMES = { iu: "IU", meq: "mEq", "µg": "mcg", "μg": "mcg", ug: "mcg" };
+function medFromLine(raw, opts = {}) {
+  const inList = opts.section === "medications" || opts.section === "supplements";
   const line = bullet(raw);
   if (line.length > 200 || /^(none|no medications|n\/a|nka)\b/i.test(line)) return null;
-  const m = line.match(/^([A-Za-z][A-Za-z\-']+(?: [A-Za-z][A-Za-z\-']+){0,2}?)\s*(?:\((.*?)\))?\s+(\d+(?:[.,]\d+)?)\s*(mg|mcg|µg|g|ml|iu|units?|%)\b(.*)$/i);
+  // the name may contain digits ("Vitamin D3", "B12"); the first word may not start with one
+  const m = line.match(/^([A-Za-z][A-Za-z0-9\-']*(?: [A-Za-z0-9][A-Za-z0-9\-']*){0,3}?)\s*(?:\((.*?)\))?\s+(\d+(?:[.,]\d+)?)\s*(mg|mcg|µg|μg|ug|g|ml|iu|units?|meq|%)\b(.*)$/i);
   const noStrength = line.match(/^([A-Z][A-Za-z\-']{3,30})\b(.*)$/);
-  let name, strength = null, unit = null, tail;
-  if (m) { name = m[1]; strength = num(m[3]); unit = m[4].toLowerCase().replace("µg", "mcg"); tail = `${m[2] || ""} ${m[5]}`; }
-  else if (noStrength && FREQ.some(([re]) => re.test(noStrength[2]))) { name = noStrength[1]; tail = noStrength[2]; }
+  let name, strength = null, unit = null, tail, paren = null;
+  if (m) {
+    name = m[1]; paren = m[2] || null; strength = num(m[3]);
+    const u = m[4].toLowerCase();
+    unit = UNIT_NAMES[u] || u;
+    tail = `${m[2] || ""} ${m[5]}`;
+  } else if (noStrength && FREQ.some(([re]) => re.test(noStrength[2]))) { name = noStrength[1]; tail = noStrength[2]; }
   else return null;
   if (/^(take|the|patient|follow|see|call|no|none|continue|stop|start)$/i.test(name.split(" ")[0])) return null;
+  if (!inList && !isKnownDrug(name, paren)) return null;
   const freq = (FREQ.find(([re]) => re.test(tail)) || [])[1];
   const form = (FORMS.find(([, re]) => re.test(tail)) || [])[0];
   const route = (ROUTES.find(([, re]) => re.test(tail)) || [])[0];
+  const supplement = opts.section === "supplements" || isSupplement(name, paren);
   const fields = { medication_name: name.trim(), strength, strength_unit: unit, dosage_form: form || null, route: route || null,
-    frequency: freq || "other", instructions: clean(tail).slice(0, 300) || null };
+    frequency: freq || "other", instructions: clean(tail).slice(0, 300) || null,
+    medication_type: supplement ? "non_prescription" : "prescription",
+    brand_name: paren && !/\d/.test(paren) && paren.length <= 60 ? paren.trim() : null };
   const warnings = ["Dose amount, schedule and pill count were not read; please check them after saving"];
   if (!freq) warnings.push("No frequency found");
-  return proposal("medication", `${fields.medication_name}${strength ? ` ${strength} ${unit}` : ""}`, fields, raw, strength && freq ? "high" : "medium", warnings);
+  if (!inList) warnings.push("Found outside a medication list; check that this is a medicine you take");
+  const sure = strength && freq && inList;
+  return proposal("medication", `${fields.medication_name}${strength ? ` ${strength} ${unit}` : ""}${supplement ? " (supplement)" : ""}`, fields, raw, sure ? "high" : "medium", warnings);
 }
 
 function conditionFromLine(raw) {
@@ -273,14 +313,16 @@ function proposalsFromText(text, fileName) {
   const fallbackDate = meta.date || new Date().toISOString().slice(0, 10);
   const items = [];
 
-  // labs: any line with a catalogue test and a number (report sections are only a hint)
+  // Each line is decided ONCE, using the heading it sits under: medicine headings give medicines, allergy/condition headings are
+  // handled below, anything else may be a lab result, or a medicine we recognise by name (Task 8-2: "Vitamin D3 2000 IU" is a medicine).
   const seen = new Set();
-  for (const line of lines) {
-    if (headingOf(line)) continue;
-    const p = labFromLine(line, fallbackDate);
-    if (p && !seen.has(p.fields.test_code)) { seen.add(p.fields.test_code); items.push(p); }
+  for (const { line, section } of taggedLines(lines)) {
+    if (section === "medications" || section === "supplements") { const p = medFromLine(line, { section }); if (p) items.push(p); continue; }
+    if (section === "allergies" || section === "conditions") continue;
+    const lab = labFromLine(line, fallbackDate, section);
+    if (lab) { if (!seen.has(lab.fields.test_code)) { seen.add(lab.fields.test_code); items.push(lab); } continue; }
+    if (section === "none" || section === "other") { const p = medFromLine(line, { section }); if (p) items.push(p); }
   }
-  for (const raw of sections.medications) { const p = medFromLine(raw); if (p) items.push(p); }
   for (const raw of sections.conditions) { const p = conditionFromLine(raw); if (p) items.push(p); }
   items.push(...allergiesFromLines(sections.allergies));
   const when = new Date(`${fallbackDate}T12:00:00.000Z`);
@@ -290,6 +332,131 @@ function proposalsFromText(text, fileName) {
   const docProposal = proposal("document", `Keep this PDF in my documents as "${doc.title}"`,
     { title: doc.title, category: doc.category, provider: doc.provider, document_date: doc.date, notes: null }, doc.title, "high");
   return [docProposal, ...items].slice(0, MAX_PROPOSALS);
+}
+
+// ---------- duplicates (Task 8-2) ----------
+// Every proposal is compared with what the patient already has. The comparison only WARNS and stops an exact repeat: it never hides
+// anything. A different dose of the same medicine ("dose_change") is always shown, because it may be a real change.
+//   level: exact | dose_change | possible | conflict | previously_stopped | in_file       existing: the record it matched
+const CURRENT_MED = ["active", "paused"];
+const CURRENT_CONDITION = ["active", "managed", "in_remission"];
+const norm = (v) => clean(v).toLowerCase().replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+const sameNumber = (a, b) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= Math.max(Math.abs(a), Math.abs(b)) * 1e-6;
+const strengthText = (v, u) => (v !== null && v !== undefined && v !== "" ? `${v}${u ? ` ${u}` : ""}` : "no strength recorded");
+const dupe = (level, existing, message) => ({ level, existing, message });
+
+async function medicationDuplicate(f, user) {
+  const cand = { name: f.medication_name, brand: f.brand_name, strength: f.strength, unit: f.strength_unit };
+  let best = null, stopped = null;
+  const rank = { exact: 0, dose_change: 1, possible: 2 };
+  for (const m of await findAll("Medication", { user_id: user.user_id })) {
+    const have = { name: m.get("medication_name"), brand: m.get("brand_name"), strength: m.get("strength"), unit: m.get("strength_unit") };
+    const cmp = compareMedicines(cand, have);
+    if (cmp.level === "none") continue;
+    const existing = { id: m.id, label: have.name, strength: have.strength ?? null, strength_unit: have.unit ?? null, status: m.get("status"), end_date: m.get("end_date") ?? null };
+    if (!CURRENT_MED.includes(m.get("status"))) { stopped = stopped || { cmp, existing }; continue; }
+    if (!best || rank[cmp.level] < rank[best.cmp.level]) best = { cmp, existing };
+  }
+  if (best) {
+    const { cmp, existing } = best, now = strengthText(f.strength, f.strength_unit), had = strengthText(existing.strength, existing.strength_unit);
+    if (cmp.level === "exact") return dupe("exact", existing, `Already in your medicines: ${existing.label} (${had}).`);
+    if (cmp.level === "dose_change") return { ...dupe("dose_change", existing, `You already have ${existing.label} at ${had}. This PDF says ${now}. That could be a dose change.`), can_update: true };
+    const why = cmp.reason === "combination" ? "a medicine with some of the same ingredients" : "the same medicine, but the strength is missing or in a different unit";
+    return { ...dupe("possible", existing, `Possible match with ${existing.label} (${had}): ${why}.`), can_update: cmp.reason !== "combination" && f.strength !== null && f.strength !== undefined };
+  }
+  if (stopped) return dupe("previously_stopped", stopped.existing, `You stopped ${stopped.existing.label}${stopped.existing.end_date ? ` on ${stopped.existing.end_date}` : ""}. Saving this adds it again as a new entry.`);
+  return null;
+}
+
+async function labDuplicate(f, user) {
+  const day = blank(f.collected_date);
+  if (!day) return null;
+  const code = blank(f.test_code), name = norm(f.test_name);
+  const value = Number(f.value);
+  for (const r of await findAll("LabResult", { user_id: user.user_id })) {
+    if (r.get("collected_date") !== day) continue;
+    if (!((code && r.get("test_code") === code) || (name && norm(r.get("test_name")) === name))) continue;
+    const existing = { id: r.id, label: r.get("test_name"), value: r.get("value_numeric") ?? r.get("value_text") ?? null, unit: r.get("unit") ?? null };
+    if (sameNumber(value, r.get("value_numeric"))) return dupe("exact", existing, `Already saved: ${existing.label} ${existing.value} ${existing.unit || ""} on ${day}.`);
+    return dupe("conflict", existing, `You already have a different ${existing.label} result for ${day} (${existing.value} ${existing.unit || ""}). Check which one is right.`);
+  }
+  return null;
+}
+
+async function conditionDuplicate(f, user) {
+  const name = norm(f.condition_name), icd = blank(f.icd10_code) ? String(f.icd10_code).trim().toUpperCase() : null;
+  let found = null;
+  for (const c of await findAll("Condition", { user_id: user.user_id })) {
+    const other = norm(c.get("condition_name"));
+    const existing = { id: c.id, label: c.get("condition_name"), status: c.get("status") };
+    let level = null;
+    if ((icd && String(c.get("icd10_code") || "").toUpperCase() === icd) || (name && name === other)) level = "exact";
+    else if (name && other && Math.min(name.length, other.length) >= 5 && (` ${other} `.includes(` ${name} `) || ` ${name} `.includes(` ${other} `))) level = "possible";
+    if (!level) continue;
+    if (!CURRENT_CONDITION.includes(c.get("status"))) { found = found || dupe("previously_stopped", existing, `You have ${existing.label} marked ${existing.status}. Saving this adds it again.`); continue; }
+    if (level === "exact") return dupe("exact", existing, `Already in your conditions: ${existing.label}.`);
+    found = dupe("possible", existing, `Possible match with ${existing.label}.`);
+  }
+  return found;
+}
+
+async function vitalDuplicate(f, user) {
+  const day = String(f.measured_at || "").slice(0, 10);
+  if (!day || !f.vital_type) return null;
+  for (const v of await findAll("VitalReading", { user_id: user.user_id, vital_type: f.vital_type })) {
+    if (!v.get("measured_at") || v.get("measured_at").toISOString().slice(0, 10) !== day) continue;
+    const existing = { id: v.id, label: f.vital_type.replace(/_/g, " "), value: v.get("value_numeric"), value_secondary: v.get("value_secondary") ?? null };
+    const same = sameNumber(Number(f.value_numeric), v.get("value_numeric")) && (f.value_secondary == null || sameNumber(Number(f.value_secondary), v.get("value_secondary")));
+    const shown = `${existing.value}${existing.value_secondary ? `/${existing.value_secondary}` : ""}`;
+    return same ? dupe("exact", existing, `Already saved: ${existing.label} ${shown} on ${day}.`)
+      : dupe("conflict", existing, `You already have a different ${existing.label} reading for ${day} (${shown}).`);
+  }
+  return null;
+}
+
+async function allergyDuplicate(f, user) {
+  if (f.no_known_allergies) return null;
+  const rec = await records.getRecord(user);
+  const have = (rec.data && Array.isArray(rec.data.allergies) ? rec.data.allergies : []).find((a) => a && norm(a.allergen) === norm(f.allergen));
+  return have ? dupe("exact", { label: have.allergen }, `Already in your allergies: ${have.allergen}.`) : null;
+}
+
+// one place that answers "does the patient already have this?" for any kind of proposal
+async function findDuplicate(section, f, user) {
+  try {
+    if (section === "medication") return await medicationDuplicate(f, user);
+    if (section === "lab_result") return await labDuplicate(f, user);
+    if (section === "condition") return await conditionDuplicate(f, user);
+    if (section === "vital") return await vitalDuplicate(f, user);
+    if (section === "allergy") return await allergyDuplicate(f, user);
+  } catch (err) { console.error("duplicate check failed:", section, err && err.message ? err.message : "error"); }
+  return null;   // a failed check never blocks saving; the patient still reviews everything
+}
+
+// marks each proposal with .duplicate; a medicine listed twice in the same PDF is marked on the second one
+async function markDuplicates(proposals, user, fileSha) {
+  const meds = [];
+  for (const p of proposals) {
+    if (p.section === "document") {
+      const saved = (await findAll("HealthDocument", { user_id: user.user_id }, { select: ["title", "file_sha256"] })).find((d) => d.get("file_sha256") === fileSha);
+      if (saved) p.duplicate = dupe("exact", { label: saved.get("title") }, `This PDF is already in your documents as "${saved.get("title")}".`);
+      continue;
+    }
+    let d = await findDuplicate(p.section, p.fields, user);
+    if (p.section === "medication") {
+      if (!d || d.level === "previously_stopped") {
+        const twin = meds.find((m) => {
+          const c = compareMedicines({ name: p.fields.medication_name, brand: p.fields.brand_name, strength: p.fields.strength, unit: p.fields.strength_unit },
+            { name: m.fields.medication_name, brand: m.fields.brand_name, strength: m.fields.strength, unit: m.fields.strength_unit });
+          return c.level === "exact" || c.level === "dose_change";
+        });
+        if (twin) d = dupe("in_file", { label: twin.fields.medication_name }, `Also listed as "${twin.label}" in this PDF.`);
+      }
+      meds.push(p);
+    }
+    if (d) p.duplicate = d;
+  }
+  return proposals;
 }
 
 // ---------- the draft ----------
@@ -327,11 +494,12 @@ async function extract(body, user, ctx) {
     return fail(422, "This PDF has no readable text (it may be a scan or photo). Please enter the information yourself.");
   }
 
-  const proposals = proposalsFromText(text, typeof body.file_name === "string" ? body.file_name : "");
+  const sha256 = crypto.createHash("sha256").update(file).digest("hex");
+  // compared with what the patient already has (Task 8-2): each proposal carries .duplicate when it matches something
+  const proposals = await markDuplicates(proposalsFromText(text, typeof body.file_name === "string" ? body.file_name : ""), user, sha256);
   const pending = await purgeOldDrafts(user.user_id);
   if (pending.length >= MAX_PENDING_DRAFTS) await destroyAll(pending.slice(0, pending.length - MAX_PENDING_DRAFTS + 1));
 
-  const sha256 = crypto.createHash("sha256").update(file).digest("hex");
   const key = sec.fileKey();
   const draft = await create("AutofillDraft", {
     user_id: user.user_id, status: "pending", file_name: documents.fileNameFor(body.file_name, "pdf"), file_sha256: sha256,
@@ -389,7 +557,7 @@ async function save1(p, f, user, ctx, draft, state) {
       const body = { medication_name: f.medication_name, status: "active", source: "document_upload", frequency: blank(f.frequency) || "other",
         dose_amount: 1, dose_unit: "dose", quantity_on_hand: 0,
         notes: "Added from an uploaded PDF. Dose, schedule and pill count were not read; please edit them." };
-      for (const k of ["strength", "strength_unit", "dosage_form", "route", "instructions", "purpose", "start_date"]) if (blank(f[k]) !== null) body[k] = f[k];
+      for (const k of ["strength", "strength_unit", "dosage_form", "route", "instructions", "purpose", "start_date", "medication_type", "brand_name"]) if (blank(f[k]) !== null) body[k] = f[k];
       state.medsChanged = true;
       return medications.create(body, user);
     }
@@ -473,15 +641,38 @@ async function confirm(id, body, user, ctx) {
   for (const it of [...picked].sort((a, b) => order(a) - order(b))) {
     const p = byId.get(it.proposal_id);
     const fields = applyEdits(p, it.fields);
+    counts[p.section] = counts[p.section] || { saved: 0, failed: 0, duplicate: 0, updated: 0 };
+    // Duplicates are checked again NOW, against what is saved at this moment (the first item of this very request may have just
+    // created the match), using the patient's corrected values. Allergies and documents have their own duplicate checks below.
+    const dup = p.section === "allergy" || p.section === "document" ? null : await findDuplicate(p.section, fields, user);
+    const stop = (error, isDuplicate = true) => {
+      counts[p.section][isDuplicate ? "duplicate" : "failed"]++;
+      results.push({ proposal_id: p.proposal_id, section: p.section, label: p.label, saved: false, error, duplicate: dup || null });
+    };
+    if (dup && dup.level === "exact" && it.allow_duplicate !== true) { stop(`${dup.message} Not saved again. If you really want a second copy, choose "save anyway".`); continue; }
+    if (p.section === "medication" && it.action !== undefined && it.action !== "add" && it.action !== "update") { stop('action must be "add" or "update"', false); continue; }
+    if (p.section === "medication" && it.action === "update") {
+      // a changed dose: update the medicine the patient already has, instead of adding a second one
+      if (!dup || !dup.can_update || !dup.existing || !dup.existing.id) { stop("There is no existing medicine to update for this item. Use add instead.", false); continue; }
+      const res = await medications.update(dup.existing.id, { strength: fields.strength, strength_unit: fields.strength_unit }, user);
+      state.medsChanged = true;
+      if (res.status >= 400) counts[p.section].failed++; else counts[p.section].updated++;
+      results.push({ proposal_id: p.proposal_id, section: p.section, label: p.label, saved: res.status < 400, updated: res.status < 400,
+        ...(res.status >= 400 ? { error: res.error || "Not saved" } : { message: `Updated ${dup.existing.label} to ${strengthText(fields.strength, fields.strength_unit)}` }) });
+      continue;
+    }
+    // a different dose of a medicine already on the list needs a deliberate choice: update it, or add this as a separate medicine
+    if (p.section === "medication" && dup && dup.level === "dose_change" && it.action !== "add") {
+      stop(`${dup.message} Choose "update my existing medicine" or "add as a separate medicine".`, false); continue;
+    }
     let res;
     try { res = await save1(p, fields, user, ctx, draft, state); }
     catch (err) { res = fail(500, "Not saved"); console.error("autofill save failed:", p.section, err && err.message ? err.message : "error"); }
-    counts[p.section] = counts[p.section] || { saved: 0, failed: 0, duplicate: 0 };
     if (res.deferred) { allergyItems.push({ p, fields }); continue; }
-    const dup = res.status === 409;
-    if (res.status >= 400) counts[p.section][dup ? "duplicate" : "failed"]++; else counts[p.section].saved++;
+    const isDup = res.status === 409;
+    if (res.status >= 400) counts[p.section][isDup ? "duplicate" : "failed"]++; else counts[p.section].saved++;
     results.push({ proposal_id: p.proposal_id, section: p.section, label: p.label, saved: res.status < 400,
-      ...(res.status >= 400 ? { error: res.error || "Not saved" } : {}) });
+      ...(dup && res.status < 400 ? { duplicate: dup } : {}), ...(res.status >= 400 ? { error: res.error || "Not saved" } : {}) });
   }
   if (allergyItems.length) {
     const r = await saveAllergies(allergyItems.map((a) => a.fields), user, ctx);

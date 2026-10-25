@@ -8,12 +8,14 @@ import { api, apiUpload } from "../api";
 // Nothing starts ticked, and nothing is saved until the "I have reviewed" box is ticked and Save is pressed.
 // Everything from the server is shown as plain text. The page never logs the file or its content.
 
+type Duplicate = { level: string; message: string; existing?: { label?: string }; can_update?: boolean };
 type Proposal = {
+  duplicate?: Duplicate;
   proposal_id: string; section: string; label: string; confidence: "high" | "medium" | "low";
   fields: Record<string, string | number | boolean | null>; source_text: string; warnings: string[];
 };
 type Draft = { draft_id: string; file_name: string; proposals: Proposal[]; already_saved_as?: string };
-type Done = { message: string; results: { proposal_id: string; label: string; saved: boolean; error?: string }[]; safety?: { open_count: number; major_open_count: number } | null };
+type Done = { message: string; results: { proposal_id: string; label: string; saved: boolean; error?: string; message?: string }[]; safety?: { open_count: number; major_open_count: number } | null };
 
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 const row: React.CSSProperties = { display: "flex", flexDirection: "row", alignItems: "center", gap: 8, margin: "4px 0" };
@@ -34,6 +36,10 @@ const EDIT: Record<string, string[]> = {
   vital: ["value_numeric", "value_secondary", "unit", "measured_at"],
 };
 const NUMERIC = new Set(["value", "strength", "value_numeric", "value_secondary"]);
+const DUP_TITLES: Record<string, string> = {
+  exact: "Already saved", dose_change: "Different dose", possible: "Possible match", conflict: "Different value",
+  previously_stopped: "Used before", in_file: "Listed twice in this PDF",
+};
 const LABEL = (k: string) => k.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
 
 export default function AutofillPdf({ onDone }: { onDone?: () => void }) {
@@ -44,12 +50,14 @@ export default function AutofillPdf({ onDone }: { onDone?: () => void }) {
   const [picked, setPicked] = useState<Record<string, boolean>>({});
   const [edits, setEdits] = useState<Record<string, Record<string, string>>>({});
   const [reviewed, setReviewed] = useState(false);
+  const [action, setAction] = useState<Record<string, "add" | "update">>({});   // dose changed: update the medicine I have, or add a separate one
+  const [forced, setForced] = useState<Record<string, boolean>>({});             // save an exact duplicate anyway
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [done, setDone] = useState<Done | null>(null);
 
   function reset() {
-    setFile(null); setFileKey((k) => k + 1); setDraft(null); setPicked({}); setEdits({}); setReviewed(false); setError(""); setDone(null);
+    setFile(null); setFileKey((k) => k + 1); setDraft(null); setPicked({}); setEdits({}); setReviewed(false); setAction({}); setForced({}); setError(""); setDone(null);
   }
 
   async function read() {
@@ -58,7 +66,7 @@ export default function AutofillPdf({ onDone }: { onDone?: () => void }) {
     setBusy(true); setError(""); setDone(null);
     try {
       const d = await apiUpload<Draft>("/documents/autofill", file, { file_name: file.name });
-      setDraft(d); setPicked({}); setEdits({}); setReviewed(false);
+      setDraft(d); setPicked({}); setEdits({}); setReviewed(false); setAction({}); setForced({});
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
   }
@@ -79,7 +87,10 @@ export default function AutofillPdf({ onDone }: { onDone?: () => void }) {
         const n = Number(v);
         fields[k] = NUMERIC.has(k) && v.trim() !== "" && Number.isFinite(n) ? n : v;
       }
-      return { proposal_id: p.proposal_id, accept: !!picked[p.proposal_id], ...(Object.keys(fields).length ? { fields } : {}) };
+      return {
+        proposal_id: p.proposal_id, accept: !!picked[p.proposal_id], ...(Object.keys(fields).length ? { fields } : {}),
+        ...(action[p.proposal_id] ? { action: action[p.proposal_id] } : {}), ...(forced[p.proposal_id] ? { allow_duplicate: true } : {}),
+      };
     });
     setBusy(true); setError("");
     try {
@@ -96,6 +107,8 @@ export default function AutofillPdf({ onDone }: { onDone?: () => void }) {
   }
 
   const count = Object.values(picked).filter(Boolean).length;
+  // a changed dose needs a choice before saving, so a real dose change is never added or dropped by accident
+  const needsChoice = (draft?.proposals ?? []).some((p) => picked[p.proposal_id] && p.duplicate?.level === "dose_change" && !action[p.proposal_id]);
   const groups = draft ? ORDER.map((s) => ({ s, items: draft.proposals.filter((p) => p.section === s) })).filter((g) => g.items.length) : [];
 
   return (
@@ -112,6 +125,7 @@ export default function AutofillPdf({ onDone }: { onDone?: () => void }) {
           {done && (
             <div className="notice success" role="status">
               <p style={{ margin: 0 }}>{done.message}</p>
+              {done.results.filter((r) => r.saved && r.message).map((r) => <p key={r.proposal_id} style={{ margin: "4px 0 0" }}>{r.message}</p>)}
               {done.results.filter((r) => !r.saved).map((r) => <p key={r.proposal_id} style={{ margin: "4px 0 0" }}>Not saved: {r.label}. {r.error}</p>)}
               {done.safety && done.safety.open_count > 0 && <p style={{ margin: "4px 0 0" }}>Medication warnings need a look: {done.safety.open_count} open.</p>}
             </div>
@@ -140,6 +154,24 @@ export default function AutofillPdf({ onDone }: { onDone?: () => void }) {
                         <input style={box} type="checkbox" checked={!!picked[p.proposal_id]} onChange={(e) => setPicked({ ...picked, [p.proposal_id]: e.target.checked })} />
                         <span><strong>{p.label}</strong>{p.confidence !== "high" && <em> (check this one)</em>}</span>
                       </label>
+                      {p.duplicate && (
+                        <p className={`notice ${p.duplicate.level === "exact" ? "error" : ""}`} style={{ margin: "6px 0" }} role="status">
+                          <strong>{DUP_TITLES[p.duplicate.level] ?? "Check this"}:</strong> {p.duplicate.message}
+                        </p>
+                      )}
+                      {picked[p.proposal_id] && p.duplicate?.level === "exact" && (
+                        <label style={row}>
+                          <input style={box} type="checkbox" checked={!!forced[p.proposal_id]} onChange={(e) => setForced({ ...forced, [p.proposal_id]: e.target.checked })} />
+                          <span>Save it anyway (a second copy)</span>
+                        </label>
+                      )}
+                      {picked[p.proposal_id] && p.section === "medication" && (p.duplicate?.level === "dose_change" || (p.duplicate?.level === "possible" && p.duplicate.can_update)) && (
+                        <fieldset style={{ margin: "6px 0" }}>
+                          <legend>What should we do?</legend>
+                          <label style={row}><input style={box} type="radio" name={`act-${p.proposal_id}`} checked={action[p.proposal_id] === "update"} onChange={() => setAction({ ...action, [p.proposal_id]: "update" })} /><span>Update the medicine I already have (change its strength)</span></label>
+                          <label style={row}><input style={box} type="radio" name={`act-${p.proposal_id}`} checked={action[p.proposal_id] === "add"} onChange={() => setAction({ ...action, [p.proposal_id]: "add" })} /><span>Add this as a separate medicine</span></label>
+                        </fieldset>
+                      )}
                       {p.source_text && g.s !== "document" && <small className="form-hint">From the PDF: “{p.source_text}”</small>}
                       {p.warnings.map((w) => <small key={w} className="form-hint" style={{ display: "block" }}>{w}</small>)}
                       {picked[p.proposal_id] && (
@@ -162,7 +194,7 @@ export default function AutofillPdf({ onDone }: { onDone?: () => void }) {
                 <span>I have reviewed the ticked items and they are correct.</span>
               </label>
               <div className="med-toolbar">
-                <button className="primary-button" type="button" disabled={busy || !reviewed || count === 0} onClick={save}>
+                <button className="primary-button" type="button" disabled={busy || !reviewed || count === 0 || needsChoice} onClick={save}>
                   {busy ? "Saving…" : `Save ${count} item${count === 1 ? "" : "s"}`}
                 </button>
                 <button className="secondary-button" type="button" disabled={busy} onClick={cancel}>Cancel — save nothing</button>
