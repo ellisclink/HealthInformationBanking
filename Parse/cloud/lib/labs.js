@@ -396,7 +396,8 @@ function reportFields(source, partial) {
 // POST /labs/reports {file_base64, title?, report_date?, lab_name?, ordered_by?, notes?, file_name?}
 async function uploadReport(body, user) {
   // A key that is set but wrong would silently store the PDF as plain text, so refuse instead (no key at all is fine)
-  if (sec.keyIsInvalid()) return { status: 503, error: sec.KEY_INVALID };
+  const blocked = sec.uploadBlock();
+  if (blocked) return { status: 503, error: blocked };
   if (!body || typeof body.file_base64 !== "string" || !body.file_base64) return { status: 400, error: "Choose a PDF file to upload" };
   if (body.file_base64.length > Math.ceil((MAX_PDF_BYTES * 4) / 3) + 16) return { status: 413, error: "PDF is too large (max 8 MB)" };
   const file = Buffer.from(body.file_base64, "base64");

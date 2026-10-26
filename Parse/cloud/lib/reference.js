@@ -173,9 +173,9 @@ const LAB_TESTS = [
     aliases: ["blood sugar", "fasting glucose", "glu", "fbg"],
     about: "Sugar in the blood after not eating for at least 8 hours.",
     advice_high:
-      "High fasting glucose can be a sign of prediabetes (100-125) or diabetes (126 and up). Diet, activity and weight loss help; ask your doctor whether you need an A1C test or medication.",
+      "A fasting glucose above the usual range has several possible causes, and one result is not a diagnosis. Ask your doctor what it means for you. Ask whether more tests are needed.",
     advice_low:
-      "Low blood sugar can cause shakiness, sweating and confusion. If you take diabetes medicine, tell your doctor; it may need adjusting.",
+      "Low blood sugar can cause shakiness, sweating and confusion. If you take diabetes medicine, tell your doctor. If you feel very unwell, get urgent help.",
     sort_order: 10,
   },
   {
@@ -192,7 +192,7 @@ const LAB_TESTS = [
     aliases: ["hba1c", "hemoglobin a1c", "glycated hemoglobin", "a1c"],
     about: "Average blood sugar over the last 2-3 months.",
     advice_high:
-      "5.7-6.4% is the prediabetes range and 6.5% or more is the diabetes range. Diet, exercise and medication can bring it down; ask your doctor for a target.",
+      "An A1C above the usual range has several possible causes, and one result is not a diagnosis. Ask your doctor what it means for you. Ask what target is right for you.",
     advice_low: null,
     sort_order: 11,
   },
@@ -210,7 +210,7 @@ const LAB_TESTS = [
     aliases: ["cholesterol", "chol", "total chol"],
     about: "All cholesterol in the blood.",
     advice_high:
-      "High cholesterol raises the risk of heart disease and stroke. Less saturated fat, more fiber, exercise and sometimes medication help; ask your doctor.",
+      "A high cholesterol level is linked to a higher chance of heart disease and stroke over time. Ask your doctor what it means for you.",
     advice_low: null,
     sort_order: 20,
   },
@@ -228,7 +228,7 @@ const LAB_TESTS = [
     aliases: ["ldl-c", "ldl cholesterol", "bad cholesterol", "ldl calc"],
     about: 'The "bad" cholesterol that builds up in arteries.',
     advice_high:
-      "High LDL builds plaque in arteries and raises heart attack and stroke risk. Diet low in saturated fat, exercise, weight loss and statin medication lower it; ask your doctor what your goal should be.",
+      "A high LDL level is linked to a higher chance of heart disease and stroke over time. Ask your doctor what your goal should be.",
     advice_low: null,
     sort_order: 21,
   },
@@ -246,7 +246,7 @@ const LAB_TESTS = [
     aliases: ["hdl-c", "hdl cholesterol", "good cholesterol"],
     about: 'The "good" cholesterol that helps clear other cholesterol.',
     advice_high: null,
-    advice_low: "Low HDL raises heart disease risk. Regular exercise, not smoking and healthy fats can raise it.",
+    advice_low: "A low HDL level is linked to a higher chance of heart disease over time. Ask your doctor what it means for you.",
     sort_order: 22,
   },
   {
@@ -263,7 +263,7 @@ const LAB_TESTS = [
     aliases: ["trig", "tg", "trigs"],
     about: "A type of fat in the blood.",
     advice_high:
-      "High triglycerides raise heart disease risk (very high levels can inflame the pancreas). Cutting sugar, refined carbs and alcohol and exercising help; ask your doctor.",
+      "High triglycerides are linked to a higher chance of heart disease, and very high levels can affect the pancreas. Ask your doctor what it means for you.",
     advice_low: null,
     sort_order: 23,
   },
@@ -280,7 +280,7 @@ const LAB_TESTS = [
     decimal_places: 0,
     aliases: ["na", "na+"],
     about: "A salt that controls fluid balance.",
-    advice_high: "High sodium usually means dehydration. Drink fluids and talk to your doctor.",
+    advice_high: "A high sodium level has several possible causes, including not drinking enough fluid. Talk to your doctor.",
     advice_low:
       "Low sodium can cause headache, confusion or weakness and can come from some medications or too much water. Talk to your doctor.",
     sort_order: 30,
@@ -317,7 +317,7 @@ const LAB_TESTS = [
     decimal_places: 0,
     aliases: ["cl", "cl-"],
     about: "A salt that works with sodium to balance fluids.",
-    advice_high: "Usually from dehydration; your doctor will look at it with your sodium.",
+    advice_high: "Often linked to dehydration; your doctor will look at it with your sodium.",
     advice_low: "Can happen with vomiting or some medications; your doctor will look at it with your sodium.",
     sort_order: 32,
   },
@@ -335,7 +335,7 @@ const LAB_TESTS = [
     aliases: ["bicarbonate", "hco3", "total co2", "bicarb"],
     about: "Shows the acid/base balance of the blood.",
     advice_high: "Can come from vomiting, water pills or lung problems. Ask your doctor.",
-    advice_low: "Can come from kidney problems, diarrhea or uncontrolled diabetes. Ask your doctor.",
+    advice_low: "Can relate to the kidneys, diarrhea or problems with blood sugar. Ask your doctor what it means for you.",
     sort_order: 33,
   },
   {
@@ -351,8 +351,8 @@ const LAB_TESTS = [
     decimal_places: 0,
     aliases: ["urea nitrogen", "urea"],
     about: "A waste product the kidneys filter out.",
-    advice_high: "Can mean dehydration, a high-protein diet or reduced kidney function. Drink water and ask your doctor.",
-    advice_low: "Usually not a concern; can come from a low-protein diet.",
+    advice_high: "Has several possible causes, including dehydration or how the kidneys are working. Ask your doctor what it means for you.",
+    advice_low: "Can be seen with a low-protein diet. Ask your doctor what it means for you.",
     sort_order: 34,
   },
   {
@@ -369,8 +369,8 @@ const LAB_TESTS = [
     aliases: ["creat", "cr", "serum creatinine"],
     about: "A muscle waste product used to check kidney function.",
     advice_high:
-      "Can mean the kidneys are not filtering as well. Stay hydrated, avoid regular NSAID pain relievers (ibuprofen, naproxen) unless your doctor says so, and ask about a follow-up test.",
-    advice_low: "Usually not a concern; often seen with low muscle mass.",
+      "Can relate to how well the kidneys are working. Ask your doctor what it means for you. Ask whether a follow-up test is needed.",
+    advice_low: "Can be seen with low muscle mass. Ask your doctor what it means for you.",
     sort_order: 35,
   },
   {
@@ -388,7 +388,7 @@ const LAB_TESTS = [
     about: "Estimate of how well the kidneys filter blood.",
     advice_high: null,
     advice_low:
-      "Below 60 for three months or more can mean chronic kidney disease. Blood pressure and blood sugar control protect the kidneys; ask your doctor about follow-up.",
+      "A low eGFR can relate to how well the kidneys are working. Ask your doctor what it means for you. Ask whether follow-up is needed.",
     sort_order: 36,
   },
   {
@@ -421,8 +421,8 @@ const LAB_TESTS = [
     decimal_places: 1,
     aliases: ["alb"],
     about: "The main protein made by the liver.",
-    advice_high: "Usually from dehydration.",
-    advice_low: "Can mean poor nutrition, liver or kidney problems. Ask your doctor.",
+    advice_high: "Often linked to dehydration. Ask your doctor what it means for you.",
+    advice_low: "Can relate to nutrition, the liver or the kidneys. Ask your doctor what it means for you.",
     sort_order: 38,
   },
   {
@@ -439,7 +439,7 @@ const LAB_TESTS = [
     aliases: ["protein", "tp"],
     about: "All protein in the blood.",
     advice_high: "Can come from dehydration or inflammation. Ask your doctor.",
-    advice_low: "Can mean poor nutrition, liver or kidney problems. Ask your doctor.",
+    advice_low: "Can relate to nutrition, the liver or the kidneys. Ask your doctor what it means for you.",
     sort_order: 39,
   },
   {
@@ -456,8 +456,8 @@ const LAB_TESTS = [
     aliases: ["sgpt", "alanine aminotransferase"],
     about: "A liver enzyme; rises when liver cells are irritated.",
     advice_high:
-      "Can come from fatty liver, alcohol, some medications or hepatitis. Limiting alcohol and weight loss help; ask your doctor.",
-    advice_low: "Usually not a concern.",
+      "Can relate to the liver, alcohol, some medications or an infection of the liver. Ask your doctor what it means for you.",
+    advice_low: "Ask your doctor what it means for you.",
     sort_order: 40,
   },
   {
@@ -474,7 +474,7 @@ const LAB_TESTS = [
     aliases: ["sgot", "aspartate aminotransferase"],
     about: "An enzyme in the liver and muscles.",
     advice_high: "Can come from liver irritation, alcohol, hard exercise or muscle injury. Ask your doctor.",
-    advice_low: "Usually not a concern.",
+    advice_low: "Ask your doctor what it means for you.",
     sort_order: 41,
   },
   {
@@ -490,8 +490,8 @@ const LAB_TESTS = [
     decimal_places: 0,
     aliases: ["alp", "alk phos", "alkaline phosphatase"],
     about: "An enzyme from the liver and bones.",
-    advice_high: "Can point to liver/bile duct or bone problems. Ask your doctor.",
-    advice_low: "Usually not a concern; can be linked to low zinc or nutrition.",
+    advice_high: "Can relate to the liver, the bile ducts or the bones. Ask your doctor what it means for you.",
+    advice_low: "Can be linked to low zinc or nutrition. Ask your doctor what it means for you.",
     sort_order: 42,
   },
   {
@@ -508,8 +508,8 @@ const LAB_TESTS = [
     aliases: ["total bilirubin", "tbili", "bili"],
     about: "A yellow substance from old red blood cells, cleared by the liver.",
     advice_high:
-      "Can cause yellow skin/eyes and can mean liver or bile duct problems (or a harmless condition called Gilbert syndrome). Ask your doctor.",
-    advice_low: "Usually not a concern.",
+      "Can cause yellow skin or eyes and can relate to the liver or bile ducts, and sometimes to a harmless condition. Ask your doctor what it means for you.",
+    advice_low: "Ask your doctor what it means for you.",
     sort_order: 43,
   },
   {
@@ -543,7 +543,7 @@ const LAB_TESTS = [
     aliases: ["red blood cell count", "erythrocytes"],
     about: "Cells that carry oxygen.",
     advice_high: "Can come from dehydration, smoking or living at high altitude. Ask your doctor.",
-    advice_low: "Can mean anemia. Ask your doctor about iron, B12 or other causes.",
+    advice_low: "Has several possible causes. Ask your doctor what is causing it.",
     sort_order: 51,
   },
   {
@@ -561,7 +561,7 @@ const LAB_TESTS = [
     about: "The protein in red blood cells that carries oxygen.",
     advice_high: "Can come from dehydration, smoking or lung conditions. Ask your doctor.",
     advice_low:
-      "Low hemoglobin is anemia and can cause tiredness and shortness of breath. Iron-rich foods help when iron is low; ask your doctor what is causing it.",
+      "Low hemoglobin can go with tiredness or shortness of breath and has several possible causes. Ask your doctor what is causing it.",
     sort_order: 52,
   },
   {
@@ -578,7 +578,7 @@ const LAB_TESTS = [
     aliases: ["hct", "packed cell volume", "pcv"],
     about: "How much of the blood is red blood cells.",
     advice_high: "Can come from dehydration or smoking. Ask your doctor.",
-    advice_low: "Can mean anemia. Ask your doctor.",
+    advice_low: "Has several possible causes. Ask your doctor what is causing it.",
     sort_order: 53,
   },
   {
@@ -595,7 +595,7 @@ const LAB_TESTS = [
     aliases: ["plt", "platelet count", "thrombocytes"],
     about: "Cells that help blood clot.",
     advice_high: "Can come from inflammation, infection or low iron. Ask your doctor.",
-    advice_low: "Can cause easy bruising or bleeding. Avoid aspirin/NSAIDs unless your doctor says otherwise, and ask your doctor.",
+    advice_low: "Can go with easy bruising or bleeding. Ask your doctor what it means for you. Ask before taking aspirin or similar pain relievers.",
     sort_order: 54,
   },
   {
@@ -612,9 +612,9 @@ const LAB_TESTS = [
     aliases: ["thyroid stimulating hormone", "thyrotropin"],
     about: "Shows how hard the body is pushing the thyroid to work.",
     advice_high:
-      "High TSH usually means an underactive thyroid (tiredness, weight gain, feeling cold). Ask your doctor; it is often treated with thyroid hormone.",
+      "A TSH above the usual range can relate to how the thyroid is working. Ask your doctor what it means for you.",
     advice_low:
-      "Low TSH usually means an overactive thyroid (fast heartbeat, weight loss) or too high a thyroid medicine dose. Ask your doctor.",
+      "A TSH below the usual range can relate to how the thyroid is working, or to thyroid medicine. Ask your doctor what it means for you.",
     sort_order: 60,
   },
   {
@@ -630,8 +630,8 @@ const LAB_TESTS = [
     decimal_places: 0,
     aliases: ["25-oh vitamin d", "25-hydroxyvitamin d", "vit d", "vitamin d3"],
     about: "Vitamin needed for strong bones.",
-    advice_high: "Very high levels usually come from taking too many supplements. Ask your doctor.",
-    advice_low: "Low vitamin D can weaken bones. Sunlight, vitamin D foods and supplements help; ask your doctor how much to take.",
+    advice_high: "Very high levels are often linked to taking supplements. Ask your doctor what it means for you.",
+    advice_low: "Low vitamin D is linked to weaker bones over time. Ask your doctor what it means for you.",
     sort_order: 70,
   },
   {
@@ -647,9 +647,9 @@ const LAB_TESTS = [
     decimal_places: 0,
     aliases: ["vitamin b12", "cobalamin", "b-12"],
     about: "Vitamin needed for nerves and red blood cells.",
-    advice_high: "Usually from supplements; rarely a concern on its own.",
+    advice_high: "Often linked to supplements. Ask your doctor what it means for you.",
     advice_low:
-      "Low B12 can cause tiredness, numbness and anemia. Common with metformin, acid-reducing medicines or a vegan diet. Ask your doctor about supplements.",
+      "A low B12 level can go with tiredness or numbness and has several possible causes; some medicines and diets are linked to it. Ask your doctor what it means for you.",
     sort_order: 71,
   },
   {
@@ -666,8 +666,8 @@ const LAB_TESTS = [
     aliases: ["urate"],
     about: "A waste product that can form crystals in joints.",
     advice_high:
-      "High uric acid can cause gout and kidney stones. Less red meat, shellfish, alcohol and sugary drinks helps; ask your doctor.",
-    advice_low: "Usually not a concern.",
+      "A high uric acid level is linked to gout and kidney stones. Ask your doctor what it means for you.",
+    advice_low: "Ask your doctor what it means for you.",
     sort_order: 72,
   },
   {
@@ -1073,35 +1073,35 @@ const DRUG_INTERACTIONS = [
     class_b: "potassium_sparing_diuretics",
     severity: "moderate",
     effect: "Both raise potassium; too much potassium can affect heart rhythm.",
-    advice: "Your doctor may want regular potassium blood tests.",
+    advice: "Ask your doctor whether potassium blood tests are needed.",
   },
   {
     class_a: "ace_inhibitors",
     class_b: "potassium_supplements",
     severity: "moderate",
     effect: "ACE inhibitors keep potassium in the body; adding potassium can push it too high.",
-    advice: "Make sure your doctor knows you take both; potassium blood tests may be needed.",
+    advice: "Make sure your doctor knows you take both, and ask whether potassium blood tests are needed.",
   },
   {
     class_a: "anticoagulants",
     class_b: "antiplatelets",
     severity: "major",
     effect: "A blood thinner plus an antiplatelet medicine greatly raises bleeding risk.",
-    advice: "This is sometimes prescribed on purpose. Make sure the doctor managing your blood thinner knows you take both.",
+    advice: "Some doctors prescribe this combination on purpose. Make sure the doctor who manages your blood thinner knows you take both.",
   },
   {
     class_a: "anticoagulants",
     class_b: "fluoroquinolones",
     severity: "moderate",
     effect: "Fluoroquinolone antibiotics can make warfarin stronger and raise bleeding risk.",
-    advice: "Your doctor may check your INR during the antibiotic.",
+    advice: "Ask your doctor or pharmacist whether extra blood tests are needed while you take both.",
   },
   {
     class_a: "anticoagulants",
     class_b: "macrolides",
     severity: "moderate",
     effect: "Some macrolide antibiotics can make blood thinners (especially warfarin) stronger.",
-    advice: "Your doctor may check your INR or watch for bleeding during the antibiotic.",
+    advice: "Ask your doctor or pharmacist whether extra blood tests are needed while you take both.",
   },
   {
     class_a: "anticoagulants",
@@ -1109,14 +1109,14 @@ const DRUG_INTERACTIONS = [
     severity: "major",
     effect:
       "Taking a blood thinner with an NSAID pain reliever (ibuprofen, naproxen, aspirin) raises the risk of serious bleeding, including stomach bleeding.",
-    advice: "Ask your doctor or pharmacist before using NSAIDs; acetaminophen is often suggested instead.",
+    advice: "Ask your doctor or pharmacist before using NSAIDs, and ask what pain relief is right for you.",
   },
   {
     class_a: "anticoagulants",
     class_b: "ssri_snri",
     severity: "moderate",
     effect: "These antidepressants can add to the bleeding risk of blood thinners.",
-    advice: "Watch for unusual bruising or bleeding and make sure both prescribers know.",
+    advice: "Make sure both prescribers know you take both, and ask what signs to watch for.",
   },
   {
     class_a: "arbs",
@@ -1130,50 +1130,55 @@ const DRUG_INTERACTIONS = [
     class_b: "potassium_sparing_diuretics",
     severity: "moderate",
     effect: "Both raise potassium; too much potassium can affect heart rhythm.",
-    advice: "Your doctor may want regular potassium blood tests.",
+    advice: "Ask your doctor whether potassium blood tests are needed.",
   },
   {
     class_a: "arbs",
     class_b: "potassium_supplements",
     severity: "moderate",
     effect: "ARBs keep potassium in the body; adding potassium can push it too high.",
-    advice: "Make sure your doctor knows you take both; potassium blood tests may be needed.",
+    advice: "Make sure your doctor knows you take both, and ask whether potassium blood tests are needed.",
   },
   {
     class_a: "benzodiazepines",
     class_b: "opioids",
     severity: "major",
     effect: "Together they can slow or stop breathing and cause extreme sleepiness.",
-    advice: "Talk to your doctor about this combination and never take more than prescribed or with alcohol.",
+    advice: "Talk to your doctor or pharmacist about this combination.",
   },
   {
     class_a: "macrolides",
     class_b: "statins",
     severity: "moderate",
     effect: "Some macrolide antibiotics (especially clarithromycin and erythromycin) raise statin levels and the risk of muscle damage.",
-    advice: "Ask the prescriber whether to pause your statin during the antibiotic. Report unexplained muscle pain.",
+    advice: "Ask your prescriber or pharmacist whether this combination needs any changes. Tell them about unexplained muscle pain.",
   },
   {
     class_a: "maois",
     class_b: "ssri_snri",
     severity: "major",
     effect: "Can cause serotonin syndrome (fever, agitation, fast heartbeat, muscle stiffness), which can be life-threatening.",
-    advice: "These are normally never taken together. Contact your prescriber right away.",
+    advice: "This combination is generally avoided. Talk to your prescriber or pharmacist right away.",
   },
   {
     class_a: "nitrates",
     class_b: "pde5_inhibitors",
     severity: "major",
     effect: "Can cause a sudden, dangerous drop in blood pressure.",
-    advice: "Do not take these together. Tell any doctor treating you for chest pain that you use a PDE5 inhibitor.",
+    advice: "This combination is generally avoided because of the sudden drop in blood pressure it can cause. Talk to your prescriber or pharmacist right away, and tell any doctor treating you for chest pain that you use a PDE5 inhibitor.",
   },
   {
     class_a: "nsaids",
     class_b: "ssri_snri",
     severity: "moderate",
     effect: "NSAIDs with these antidepressants raise the risk of stomach bleeding.",
-    advice: "Ask your pharmacist whether you need stomach protection or a different pain reliever.",
+    advice: "Ask your pharmacist or doctor whether this combination is a concern for you.",
   },
 ];
 
-module.exports = { VITAL_TYPES, LAB_TESTS, DRUG_CLASSES, DRUG_CLASS_MEMBERS, CROSS_REACTIVITY, DRUG_INTERACTIONS };
+// Version of the built-in drug warning lists and lab ranges. Change it whenever you edit those lists. Only add a "reviewed by" line anywhere
+// after a qualified person has actually checked the lists against current drug labels.
+const REFERENCE_VERSION = "2026-10-25";
+const WARNING_LIST_NOTE = "This warning list covers a short list of common medicines. It is updated by hand and may be out of date. No warning does not mean a medicine is safe for you. Ask your pharmacist or doctor.";
+
+module.exports = { REFERENCE_VERSION, WARNING_LIST_NOTE, VITAL_TYPES, LAB_TESTS, DRUG_CLASSES, DRUG_CLASS_MEMBERS, CROSS_REACTIVITY, DRUG_INTERACTIONS };

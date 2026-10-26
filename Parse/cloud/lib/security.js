@@ -1,55 +1,69 @@
 // security.js — rate limits, code hashing, encryption, NPI check, email.
 const crypto = require("crypto");
-const { findOne, create, save } = require("./db");
+const { M, findAll, create, destroyAll } = require("./db");
 
 // ---------- rate limits (stored in the database, so they work across server instances) ----------
 // key: e.g. "login:email@x.com". `limit` hits per `windowMs`.
+//
+// A key normally has ONE row { key, count, reset_at }. Parse can't declare RateLimit.key unique, so requests that arrive at
+// the very same moment on a new key (or just after its window ended) each create their own row. So every count here is the
+// SUM over all live rows of the key, and it is read AFTER the write. A request that finishes its write therefore sees every
+// request that finished before it, and no more than `limit` simultaneous requests can ever get a count of `limit` or less.
+// Expired rows are deleted when the key is next used, so a key never piles up rows.
+async function liveRows(key, prune = false) {
+  const now = new Date();
+  const all = await findAll("RateLimit", { key });
+  const live = all.filter((r) => r.get("reset_at") > now);
+  if (prune && live.length < all.length) {
+    await destroyAll(all.filter((r) => r.get("reset_at") <= now)).catch(() => {});   // another request may have deleted them already
+  }
+  return live;
+}
+const sumCounts = (rows) => rows.reduce((n, r) => n + (r.get("count") || 0), 0);
+
+// { count, resetAt } for the current window, or null when the key has no live window
 async function limitState(key) {
-  const row = await findOne("RateLimit", { key });
-  if (!row) return null;
-  if (row.get("reset_at") <= new Date()) return null;
-  return row;
+  const rows = await liveRows(key);
+  if (!rows.length) return null;
+  return { count: sumCounts(rows), resetAt: new Date(Math.max(...rows.map((r) => r.get("reset_at").getTime()))) };
 }
 async function blocked(key, limit) {
-  const row = await limitState(key);
-  return !!row && row.get("count") >= limit;
+  const state = await limitState(key);
+  return !!state && state.count >= limit;
 }
+// hit(key, windowMs): counts one request. Use take() when you need the count; use hit() after the fact.
 async function hit(key, windowMs) {
-  const existing = await findOne("RateLimit", { key });
-  if (existing && existing.get("reset_at") > new Date()) {
-    existing.increment("count");
-    await existing.save(null, { useMasterKey: true });
-    return;
-  }
-  const resetAt = new Date(Date.now() + windowMs);
-  if (existing) await save(existing, { count: 1, reset_at: resetAt });
-  else await create("RateLimit", { key, count: 1, reset_at: resetAt });
+  await take(key, windowMs);
 }
 // take(key, windowMs): counts one request and returns the count in the current window, so the caller compares AFTER
-// counting (no gap between checking and counting). The count uses Parse's increment operation, which the database
-// applies atomically and returns. Limitation: Parse can't declare RateLimit.key unique, so two first requests at the
-// same moment can each create a row (the window then undercounts a little); later requests add to one of them.
+// counting (no gap between checking and counting):  if ((await sec.take(key, windowMs)) > LIMIT) refuse.
 async function take(key, windowMs) {
-  const existing = await findOne("RateLimit", { key });
-  if (existing && existing.get("reset_at") > new Date()) {
-    existing.increment("count");
-    await existing.save(null, { useMasterKey: true });
-    return existing.get("count");
+  const rows = await liveRows(key, true);
+  if (rows.length) {
+    rows[0].increment("count");                      // the database applies this atomically
+    await rows[0].save(null, M);
+  } else {
+    await create("RateLimit", { key, count: 1, reset_at: new Date(Date.now() + windowMs) });
   }
-  const resetAt = new Date(Date.now() + windowMs);
-  if (existing) await save(existing, { count: 1, reset_at: resetAt });
-  else await create("RateLimit", { key, count: 1, reset_at: resetAt });
-  return 1;
+  return sumCounts(await liveRows(key));             // read back after the write (see the note above)
+}
+// refund(key): gives one count back. Use it together with take(): count the attempt BEFORE checking the password or code,
+// then refund it if the attempt was fine. A wrong guess stays counted even when many guesses arrive at the same moment
+// (checking first and counting afterwards lets all of them through together).
+async function refund(key) {
+  const row = (await liveRows(key)).find((r) => r.get("count") > 0);
+  if (row) {
+    row.increment("count", -1);
+    await row.save(null, M);
+  }
 }
 async function resetLimit(key) {
-  const row = await findOne("RateLimit", { key });
-  if (row) await row.destroy({ useMasterKey: true });
+  await destroyAll(await findAll("RateLimit", { key }));
 }
 async function minutesLeft(key) {
-  const row = await limitState(key);
-  return row ? Math.max(1, Math.ceil((row.get("reset_at") - Date.now()) / 60000)) : 0;
+  const state = await limitState(key);
+  return state ? Math.max(1, Math.ceil((state.resetAt - Date.now()) / 60000)) : 0;
 }
-
 // ---------- codes ----------
 const new2faCode = () => String(crypto.randomInt(0, 100000000)).padStart(8, "0");
 const newResetCode = () => crypto.randomBytes(8).toString("hex");
@@ -83,6 +97,10 @@ function fileKey() {
 // ENCRYPTION_KEY set (not blank) but not 64 hex characters: fileKey() can't use it. Uploads must refuse (503) instead of
 // quietly storing plain text; opening an encrypted file refuses too. No key at all is fine (files are stored unencrypted).
 const KEY_INVALID = "ENCRYPTION_KEY is set but not valid; fix it before uploading";
+// REQUIRE_ENCRYPTION=true (set it on Back4app): uploads are refused until a valid ENCRYPTION_KEY exists, so the Privacy Policy's statement that
+// uploaded files are encrypted is always true. Without the setting, a missing key still stores files unencrypted (fine on your own computer).
+const KEY_REQUIRED = "File uploads are turned off until an ENCRYPTION_KEY is set on the server";
+const uploadBlock = () => (keyIsInvalid() ? KEY_INVALID : (process.env.REQUIRE_ENCRYPTION === "true" && !fileKey() ? KEY_REQUIRED : null));
 const keyIsInvalid = () => !!String(process.env.ENCRYPTION_KEY || "").trim() && !fileKey();
 function encrypt(key, plaintext) {
   const iv = crypto.randomBytes(12);
@@ -113,11 +131,15 @@ function isValidNpi(npi) {
 
 // ---------- email ----------
 // Set SMTP_USER + SMTP_PASS (a Gmail app password works) in the Back4app environment
-// variables to send real emails. Without them, codes are written to the Cloud Code logs,
-// and with MIB_SHOW_CODES=true they're also shown on screen (demo only — never with real users).
-process.env.SMTP_USER = "healthinformationbanking@gmail.com"
-process.env.SMTP_PASS = "zytfkzlurdrnlyca"
-const DEV_MODE = !process.env.SMTP_USER || !process.env.SMTP_PASS;
+// variables to send real emails.
+// Without them the server does NOT quietly print login codes into its log: sending fails, so login and password reset
+// stop working (they fail closed) until email is set up. Printing codes is allowed only when MIB_DEV_MODE=true is set;
+// Parse/local/local-server.js sets it for you on your own computer. Do not set it on any site with real users (a demo site
+// with made-up data is fine).
+// With MIB_DEV_MODE=true and no SMTP, codes are written to the log, and with MIB_SHOW_CODES=true they are also shown on
+// screen (demo only, never with real users).
+const DEV_MODE = !process.env.SMTP_USER || !process.env.SMTP_PASS;   // no mail server configured
+const DEV_CODES = DEV_MODE && process.env.MIB_DEV_MODE === "true";   // ...and printing codes instead is explicitly allowed
 let transporter = null;
 function mailer() {
   if (DEV_MODE) return null;
@@ -136,15 +158,17 @@ function mailer() {
 async function sendEmail(to, subject, text, devLabel) {
   const m = mailer();
   if (!m) {
+    // No mail server. Refuse, unless printing codes was explicitly allowed (your own computer only).
+    if (!DEV_CODES) throw new Error("email is not set up: set SMTP_USER and SMTP_PASS (or MIB_DEV_MODE=true on your own computer)");
     console.log(`[DEV] ${devLabel} for ${to}: ${text.match(/\b[0-9a-f]{8,16}\b/)?.[0] ?? text}`);
     return;
   }
   await m.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to, subject, text });
 }
-const showCodes = () => DEV_MODE && process.env.MIB_SHOW_CODES === "true";
+const showCodes = () => DEV_CODES && process.env.MIB_SHOW_CODES === "true";
 
 module.exports = {
-  blocked, hit, take, resetLimit, minutesLeft,
+  blocked, hit, take, refund, resetLimit, minutesLeft,
   new2faCode, newResetCode, sha256, hashCode, checkCode, newShareCode,
-  fileKey, keyIsInvalid, KEY_INVALID, encrypt, decrypt, isValidNpi, sendEmail, showCodes, DEV_MODE,
+  fileKey, keyIsInvalid, uploadBlock, KEY_INVALID, encrypt, decrypt, isValidNpi, sendEmail, showCodes, DEV_MODE,
 };

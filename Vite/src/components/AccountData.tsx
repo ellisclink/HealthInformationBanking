@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, clearSession } from "../api";
+import PasswordInput from "./PasswordInput";
 
 // Your data: download everything as a file, or delete the account. Both ask for your password again.
 //   POST /account/export       GET/POST/DELETE /account/deletion
@@ -56,10 +57,7 @@ export default function AccountData() {
       {error && <p className="notice error" role="alert">{error}</p>}
       {message && !error && <p className="notice success" role="status">{message}</p>}
 
-      <div className="form-group">
-        <label htmlFor="acct-password">Your password (needed for both actions below)</label>
-        <input id="acct-password" type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
-      </div>
+      <PasswordInput id="acct-password" label="Your password (needed for both actions below)" value={password} onChange={setPassword} autoComplete="current-password" />
 
       <h4>Download my data</h4>
       <p>Everything in your account as one file (JSON).</p>

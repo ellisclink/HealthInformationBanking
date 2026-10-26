@@ -1,13 +1,39 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Navigate } from "react-router-dom";
-import { currentRole, dashboardPath, isLoggedIn, type Role } from "../api";
+import { api, currentRole, dashboardPath, isLoggedIn, type Me, type Role } from "../api";
+import Parse from "../parse";
+import AcceptTerms from "./AcceptTerms";
 
 // Wraps a page so it can only be opened while logged in (and, if `role` is given,
 // only by that kind of account). Before this, every page could be opened by typing
 // its URL, logged in or not.
+// It also checks ONCE per login that the account has agreed to the current Terms of Service and Privacy Policy
+// (GET /me -> terms.needs_acceptance); if not, the agreement screen is shown instead of the page. If that check
+// itself fails (no connection), the page is shown: the server still checks every request.
+const agreed = new Set<string>();   // user ids confirmed in this browser tab
+
 function RequireAuth({ children, role }: { children: ReactNode; role?: Role }) {
-  if (!isLoggedIn()) return <Navigate to="/" replace />;
+  const loggedIn = isLoggedIn();
+  const uid = Parse.User.current()?.id ?? "";
+  const [state, setState] = useState<"checking" | "needs" | "ok">(uid && agreed.has(uid) ? "ok" : "checking");
+
+  useEffect(() => {
+    if (!uid || agreed.has(uid)) return;
+    let live = true;
+    api<Me>("/me")
+      .then((me) => {
+        if (!live) return;
+        if (me.terms?.needs_acceptance) setState("needs");
+        else { agreed.add(uid); setState("ok"); }
+      })
+      .catch(() => { if (live) setState("ok"); });
+    return () => { live = false; };
+  }, [uid]);
+
+  if (!loggedIn) return <Navigate to="/" replace />;
   if (role && currentRole() !== role) return <Navigate to={dashboardPath()} replace />;
+  if (state === "checking") return <p className="page-container" role="status">Loading…</p>;
+  if (state === "needs") return <AcceptTerms onDone={() => { agreed.add(uid); setState("ok"); }} />;
   return <>{children}</>;
 }
 

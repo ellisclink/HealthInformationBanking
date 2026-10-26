@@ -120,13 +120,15 @@ async function sharedSections(userId, sections, mods) {
 
 // POST /shared/:code {viewerName?} — open a shared record (read-only)
 async function openShared(code, body, user, ctx, mods) {
-  if (await sec.blocked(lookupKey(ctx), LOOKUP_LIMIT)) return TOO_MANY;
+  // Counted BEFORE the lookup (LOOKUP_LIMIT tries per device in 15 minutes), so many guesses sent at once can't all get
+  // through; a real code gives its count back below.
+  if ((await sec.take(lookupKey(ctx), MIN15)) > LOOKUP_LIMIT) return TOO_MANY;
   const share = await findLiveShare(code);
   if (!share) {
-    await sec.hit(lookupKey(ctx), MIN15);
     await audit({ event: "share_code_invalid", ip: ctx.ip });
     return BAD_CODE;
   }
+  await sec.refund(lookupKey(ctx));
   let viewer;
   if (share.get("audience") === "provider") {
     if (!user) return { status: 401, error: "this code is for a healthcare provider — log in with a physician account to open it" };

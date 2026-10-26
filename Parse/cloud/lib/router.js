@@ -73,6 +73,7 @@ async function route({ method, path, query, body }, ctx) {
   // the account itself: any role (a physician can export or delete their own login too)
   if (section === "account") {
     if (parts.length === 2 && id === "export" && m === "POST") return account.exportData(body, user, ctx);
+    if (parts.length === 2 && id === "accept-terms" && m === "POST") return account.acceptTerms(body, user, ctx);
     if (parts.length === 2 && id === "deletion") {
       if (m === "GET") return account.deletionStatus(user);
       if (m === "POST") return account.requestDeletion(body, user, ctx);

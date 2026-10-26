@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import AlertBanner from "../components/AlertBanner";
 import NavigationBar from "../components/NavigationBar";
+import MedicalNotice from "../components/MedicalNotice";
 import { api, localDate } from "../api";
 
 // Medication inventory: what the patient takes and how many pills they have.
@@ -94,6 +95,7 @@ function Medications() {
 
   // safety warnings are extra: if that module isn't installed, the page still works
   const loadAlerts = () => api<{ alerts: SafetyAlert[] }>("/safety/alerts").then((r) => r.alerts).catch(() => [] as SafetyAlert[]);
+  // (the version and note about the built-in warning list are fixed text on the page; the server sends the same text in `reference`)
 
   async function load() {
     const [list, sum, al] = await Promise.all([
@@ -222,6 +224,7 @@ function Medications() {
           <h2>Medications</h2>
           <p>Track what you take, how many you have left, and when to refill.</p>
         </section>
+        <MedicalNotice kind="warnings" />
 
         {summary && (
           <div className="med-stats">
@@ -243,6 +246,7 @@ function Medications() {
           <section className="safety-panel" aria-labelledby="safety-heading">
             <h3 id="safety-heading">Safety warnings {openAlerts.length > 0 && <span className="safety-count">{openAlerts.length}</span>}</h3>
             <p className="form-hint">Checked against the allergies on your Health History form and your other medicines (common drugs only). {ALWAYS}</p>
+            <p className="form-hint">Warning list version 2026-10-25. It covers a short list of common medicines, is updated by hand and may be out of date. No warning does not mean a medicine is safe for you. Ask your pharmacist or doctor.</p>
             {openAlerts.length === 0 && <p>You've reviewed every warning.</p>}
             {openAlerts.map((a) => (
               <WarningBox key={a.alert_id} w={a}>

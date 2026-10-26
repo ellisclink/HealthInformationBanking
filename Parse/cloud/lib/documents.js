@@ -120,7 +120,8 @@ async function list(query, user) {
 // POST /documents — details (title, category, provider, document_date, notes, tags) come in the query string
 async function upload(body, user, ctx) {
   // A key that is set but wrong would silently store the file as plain text, so refuse instead (no key at all is fine)
-  if (sec.keyIsInvalid()) return fail(503, sec.KEY_INVALID);
+  const blocked = sec.uploadBlock();
+  if (blocked) return fail(503, blocked);
   if (typeof body.file_base64 !== "string" || !body.file_base64) return fail(400, "Choose a PDF, JPG or PNG file to upload");
   // Line breaks and spaces (a wrapped base64 text) don't count toward the size or the decode
   const base64 = body.file_base64.replace(/\s+/g, "");

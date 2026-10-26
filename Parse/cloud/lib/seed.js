@@ -14,6 +14,7 @@
 
 const { route } = require("./router");
 const auth = require("./auth");
+const legal = require("./legal");
 const { M, findAll, findOne, destroyAll, save } = require("./db");
 const { SCHEMA } = require("./setup");
 const sec = require("./security");
@@ -238,7 +239,7 @@ async function deleteAccount(email) {
 
 async function newAccount({ email, name, password }, extra = {}) {
   const u = new Parse.User();
-  u.set({ username: email, email, password, name, role: "patient", ...extra });
+  u.set({ username: email, email, password, name, role: "patient", ...legal.acceptanceFields(), ...extra });
   await u.signUp(null, M);
   u.setACL(new Parse.ACL(u));
   await u.save(null, M);

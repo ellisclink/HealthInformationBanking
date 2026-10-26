@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import MedicalNotice from "../components/MedicalNotice";
 import NavigationBar from '../components/NavigationBar';
 import VitalTrendChart from '../components/VitalTrendChart';
 import { api, type VitalCard, type VitalType } from '../api';
@@ -22,7 +23,7 @@ function BmiCard({ card, bucket }: { card: VitalCard; bucket: 'day' | 'month' })
       <p>Latest: {dateOf(today.measured_at)} ({today.age_label})</p>
       {today.source === 'calculated' && <p><strong>Calculated</strong> from your weight and height</p>}
       <p className={`range-status ${today.evaluation.status}`}>{today.evaluation.status.replaceAll('_', ' ')} · {today.evaluation.range.source.replaceAll('_', ' ')}</p>
-      {info?.category && <p>Category (adults): {info.category}</p>}
+      {info?.category && <p>Category (adults): {info.category}. <small>BMI is a rough guide. It does not account for muscle, age or body type. Ask your doctor what it means for you.</small></p>}
       {info && !info.category && info.note && <p>{info.note}</p>}
     </>}
     <VitalTrendChart card={card} bucket={bucket} />{card.change && <p>Change: {card.change.delta > 0 ? '+' : ''}{card.change.delta} {card.unit} ({card.change.direction})</p>}
@@ -91,6 +92,7 @@ function VitalSigns() {
   }
   return <><NavigationBar /><main className="page-container feature-page">
     <h2>Vital Signs</h2><p>Log readings and review changes over time. Range indicators use the backend’s reference or personal target values.</p>
+    <MedicalNotice kind="results" />
     {error && <p className="notice error" role="alert">{error}</p>}{message && <p className="notice success" role="status">{message}</p>}
     <form className="feature-card feature-form" onSubmit={record}><h3>Record a reading</h3>
       <label>Vital sign<select required value={selected} onChange={e => { setSelected(e.target.value); setValue(''); setSecondary(''); }}>{types.map(t => <option key={t.vital_type} value={t.vital_type}>{t.display_name}</option>)}</select></label>

@@ -320,14 +320,16 @@ function responderFrom(body) {
 }
 
 async function openAccess(code, ctx) {
-  if (await sec.blocked(lookupKey(ctx), LOOKUP_LIMIT)) return { error: TOO_MANY };
+  // Counted BEFORE the lookup (LOOKUP_LIMIT tries per device in 15 minutes), so many guesses sent at once can't all get
+  // through; a real code gives its count back below.
+  if ((await sec.take(lookupKey(ctx), MIN15)) > LOOKUP_LIMIT) return { error: TOO_MANY };
   const access = await findOne("EmergencyAccess", { code: String(code || "").trim().toUpperCase() });
   const profile = access && !access.get("revoked") ? await profileObject(access.get("user_id")) : null;
   if (!access || access.get("revoked") || !profile || !profile.get("enabled")) {
-    await sec.hit(lookupKey(ctx), MIN15);
     await audit({ event: "emergency_code_invalid", ip: ctx.ip });
     return { error: BAD_CODE };
   }
+  await sec.refund(lookupKey(ctx));
   return { access };
 }
 

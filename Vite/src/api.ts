@@ -23,7 +23,10 @@ export type VitalCard = {
 // disappears when the tab closes. Name and role come from the logged-in Parse user;
 // only the server can change them (the role can't be picked by the user).
 export type Role = 'patient' | 'physician';
-export type Me = { user_id: string; email: string; name: string; role: Role; npi?: string | null };
+export type Me = {
+  user_id: string; email: string; name: string; role: Role; npi?: string | null;
+  terms?: { current_version: string; accepted_version: string | null; needs_acceptance: boolean };
+};
 
 // Forget the login in this tab only (the server side is ended by /logout, or has
 // already expired). Parse.User.logOut() would ask the server again and get an error.

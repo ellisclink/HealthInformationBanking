@@ -964,3 +964,41 @@ a.secondary-button {
 @media print {
   .navigation-bar, .no-print, .notification-bell { display: none !important; }
 }
+
+/* password box with Show/Hide and the strength checklist */
+.password-row { display: flex; gap: 8px; align-items: stretch; }
+.password-row input { flex: 1; min-width: 0; }
+.password-toggle { flex: none; width: auto; min-width: 64px; margin: 0; padding: 0 12px; }
+.password-tips { margin-top: 6px; font-size: 14px; }
+.password-bar { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+.password-bar span { height: 6px; border-radius: 3px; }
+.password-level { margin: 4px 0; font-weight: 600; }
+.password-tips ul { list-style: none; margin: 4px 0 0; padding: 0; }
+.password-tips li { margin: 2px 0; color: #566; }
+.password-tips li.ok { color: #1b6b3a; }
+.password-tips li.bad { color: #8c1d23; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+/* tick box + sentence on one line (the site's global label/input styles would stretch the box across the row) */
+.check-row { display: flex; flex-direction: row; align-items: flex-start; gap: 8px; margin: 12px 0; }
+.check-row input { width: auto; margin: 4px 0 0; flex: none; }
+/* footer and the Terms / Privacy pages */
+.site-footer { margin: 32px auto 0; padding: 16px; max-width: 960px; text-align: center; font-size: 14px; color: #566; border-top: 1px solid #dde3ea; }
+.site-footer nav { display: flex; flex-wrap: wrap; gap: 16px; justify-content: center; margin-bottom: 6px; }
+.site-footer p { margin: 4px 0; }
+.legal-body h3 { margin: 24px 0 6px; }
+.legal-body p, .legal-body li { line-height: 1.55; }
+.legal-toc { margin: 12px 0 20px; padding: 12px 16px; background: #f4f6f8; border-radius: 8px; }
+.legal-toc ol { margin: 6px 0 0; columns: 2; }
+@media (max-width: 600px) { .legal-toc ol { columns: 1; } }
+
+/* "Privacy at a glance" table (Model Privacy Notice layout) */
+.mpn { margin: 0 0 28px; padding: 16px; border: 2px solid #1c3d5a; border-radius: 10px; background: #fff; }
+.mpn table { width: 100%; border-collapse: collapse; margin: 8px 0; }
+.mpn th, .mpn td { text-align: left; vertical-align: top; padding: 8px 10px; border-top: 1px solid #dde3ea; font-size: 15px; line-height: 1.45; }
+.mpn th { width: 30%; font-weight: 700; background: #f4f6f8; }
+@media (max-width: 700px) { .mpn th, .mpn td { display: block; width: auto; } .mpn th { border-bottom: 0; } }
+@media print { .mpn { break-inside: avoid; } }
+
+/* short "not medical advice" notice on pages that show results */
+.medical-notice { margin: 8px 0 16px; background: #fff8e1; color: #5c4400; border: 1px solid #f0d58a; }
+.medical-notice a { color: inherit; font-weight: 600; }

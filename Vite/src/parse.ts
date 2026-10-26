@@ -1,30 +1,28 @@
 // parse.ts — connects the website to Parse (Back4app), once, for the whole app.
 //
 // Where it points:
-//   - opened from this computer (localhost / 127.0.0.1): the local Parse Server (Parse/local), no setup needed
-//   - anywhere else (the Back4app site): the Back4app app set by these environment variables at build time
-//       VITE_PARSE_APP_ID      Back4app > App Settings > Security & Keys > Application ID
-//       VITE_PARSE_JS_KEY      Back4app > App Settings > Security & Keys > JavaScript key
-//       VITE_PARSE_SERVER_URL  optional, defaults to https://parseapi.back4app.com
-//     Set them in the Back4app web deployment's environment variables, or in Vite/.env.local to test a build.
-// The App ID and JavaScript key end up in every visitor's browser, so they are not secrets.
+//   - set VITE_PARSE_APP_ID / VITE_PARSE_JS_KEY / VITE_PARSE_SERVER_URL in a .env file to override
+//   - opened from this computer (localhost / 127.0.0.1): the local Parse Server (Parse/local)
+//   - anywhere else (the Back4app site): the Back4app app below
+// The App ID and JavaScript key are meant to be public (every visitor's browser has them).
 // What protects the data is that every class is locked to Cloud Code (Parse/cloud/lib/setup.js).
-// NEVER put the Master Key here or in any VITE_ variable.
+// NEVER put the Master Key in this file.
 import Parse from "parse";
+
+const BACK4APP = {
+  appId: "KCJXY2rFr1eu1cAWPYJPnZr89yx68fXGnsF7u9a3",
+  jsKey: "bFVBDImmKKEfQGs8PpAiunSXe4SM49fo3EsxkLbJ",
+  serverURL: "https://parseapi.back4app.com",
+};
+const LOCAL = { appId: "mib-local", jsKey: "mib-local-js", serverURL: `${window.location.origin}/parse` };
 
 const isLocal = ["localhost", "127.0.0.1"].includes(window.location.hostname);
 const env = import.meta.env;
-const LOCAL = { appId: "mib-local", jsKey: "mib-local-js", serverURL: `${window.location.origin}/parse` };
-
 const config = {
-  appId: env.VITE_PARSE_APP_ID || (isLocal ? LOCAL.appId : ""),
-  jsKey: env.VITE_PARSE_JS_KEY || (isLocal ? LOCAL.jsKey : ""),
-  serverURL: env.VITE_PARSE_SERVER_URL || (isLocal ? LOCAL.serverURL : "https://parseapi.back4app.com"),
+  appId: env.VITE_PARSE_APP_ID || (isLocal ? LOCAL.appId : BACK4APP.appId),
+  jsKey: env.VITE_PARSE_JS_KEY || (isLocal ? LOCAL.jsKey : BACK4APP.jsKey),
+  serverURL: env.VITE_PARSE_SERVER_URL || (isLocal ? LOCAL.serverURL : BACK4APP.serverURL),
 };
-if (!config.appId || !config.jsKey) {
-  // the site was built without the Back4app keys: say so plainly instead of failing on every request
-  throw new Error("Missing VITE_PARSE_APP_ID or VITE_PARSE_JS_KEY. Add them to the web deployment's environment variables and redeploy.");
-}
 
 // Keep the login in sessionStorage (not localStorage), so closing the tab logs out —
 // important on shared or clinic computers.

@@ -7,12 +7,18 @@
 //      beforeLogin (below) only lets a login through if step 2 happened in the last 5 minutes,
 //      so calling Parse's login directly without the code is refused.
 //
+// Rate limits: every attempt is counted BEFORE it is checked (sec.take) and given back when it turns out to be fine
+// (sec.refund / sec.resetLimit). Checking first and counting afterwards lets many guesses sent at the same moment all
+// get through. Parse's own /login is not covered by these limits: turn on Parse's account lockout too (see the README).
+//
 // Users: username = email (lower case), plus name, role ('patient' | 'physician') and npi.
 // Only Cloud Code (master key) can create or change a user, so nobody can make
 // themselves a physician from the browser.
 
 const { M, findAll, findOne, create, save, destroyAll, audit } = require("./db");
 const sec = require("./security");
+const legal = require("./legal");
+const password = require("./password");
 
 const CODE_TTL_MIN = 10;
 const MAX_CODE_ATTEMPTS = 5;
@@ -20,8 +26,6 @@ const VERIFIED_WINDOW_MIN = 5;     // time between passing the code and logging 
 const SESSION_IDLE_MIN = 30;
 const SESSION_MAX_HOURS = 12;
 const RESET_TTL_MIN = 15;
-const MIN_PASSWORD = 8;
-const MAX_PASSWORD = 128;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MIN15 = 15 * 60 * 1000;
 const HOUR = 60 * 60 * 1000;
@@ -29,16 +33,13 @@ const HOUR = 60 * 60 * 1000;
 const tooMany = async (key, what) =>
   ({ status: 429, error: `too many ${what} — try again in ${await sec.minutesLeft(key)} minute(s)` });
 
-function passwordProblem(password) {
-  if (typeof password !== "string" || password.length < MIN_PASSWORD) return `password must be at least ${MIN_PASSWORD} characters`;
-  if (password.length > MAX_PASSWORD) return `password must be ${MAX_PASSWORD} characters or fewer`;
-  return null;
-}
+// the rules are in password.js; `who` keeps the password from containing the person's email name or name
+const passwordProblem = (pw, who) => password.firstProblem(pw, who);
 
 // plain user object handed to the feature modules
 const asUser = (u) => u && ({
   user_id: u.id, user_email: u.get("username"), user_name: u.get("name") || u.get("username"),
-  role: u.get("role") || "patient", npi: u.get("npi") || null,
+  role: u.get("role") || "patient", npi: u.get("npi") || null, terms_version: u.get("terms_version") || null,
 });
 
 async function userByEmail(email) {
@@ -50,22 +51,23 @@ async function userByEmail(email) {
 // ---------- POST /register {email, name, password} ----------
 async function register(body, ctx) {
   const ipKey = `register-ip:${ctx.ip}`;
-  if (await sec.blocked(ipKey, 10)) return tooMany(ipKey, "sign-ups from this device");
-  await sec.hit(ipKey, HOUR);
+  if ((await sec.take(ipKey, HOUR)) > 10) return tooMany(ipKey, "sign-ups from this device");   // 10 sign-ups an hour
   const { email, name, password } = body;
   if (typeof email !== "string" || typeof name !== "string" || typeof password !== "string" || !email.trim() || !name.trim() || !password) {
     return { status: 400, error: "email, name, password required" };
   }
+  // agreeing to the Terms and Privacy Policy (and being 18 or older) is required, and is recorded with the account
+  if (body.accepted_terms !== true) return { status: 400, error: `you must agree to the Terms of Service and Privacy Policy, and confirm you are ${legal.MIN_AGE} or older` };
   const cleanEmail = email.toLowerCase().trim();
   const cleanName = name.trim();
   if (cleanEmail.length > 255 || !EMAIL_RE.test(cleanEmail)) return { status: 400, error: "please enter a valid email address" };
   if (cleanName.length > 255) return { status: 400, error: "name must be 255 characters or fewer" };
-  const pwError = passwordProblem(password);
-  if (pwError) return { status: 400, error: pwError };
+  const pwError = passwordProblem(password, { email: cleanEmail, name: cleanName });
+  if (pwError) return { status: 400, error: `Choose a stronger password. ${pwError}` };
   if (await userByEmail(cleanEmail)) return { status: 409, error: "email already registered" };
 
   const user = new Parse.User();
-  user.set({ username: cleanEmail, email: cleanEmail, password, name: cleanName, role: "patient" });
+  user.set({ username: cleanEmail, email: cleanEmail, password, name: cleanName, role: "patient", ...legal.acceptanceFields() });
   try {
     await user.signUp(null, M);
   } catch (err) {
@@ -78,6 +80,7 @@ async function register(body, ctx) {
   await endAllSessions(user.id);
   await create("MedicalRecord", { user_id: user.id, data: {} });
   await audit({ userId: user.id, event: "register", ip: ctx.ip });
+  await audit({ userId: user.id, event: "terms_accepted", ip: ctx.ip, detail: { version: legal.TERMS_VERSION } });
   return { status: 201, ok: true };
 }
 
@@ -89,11 +92,14 @@ async function login(body, ctx) {
   }
   const cleanEmail = email.toLowerCase().trim();
   const emailKey = `login:${cleanEmail}`, ipKey = `login-ip:${ctx.ip}`;
-  if (await sec.blocked(emailKey, 5)) {
+  // Count this attempt first, then check the password. Limits are the same as before: 5 wrong passwords per account and
+  // 30 per device in 15 minutes. A correct password gives its counts back below.
+  if ((await sec.take(ipKey, MIN15)) > 30) return tooMany(ipKey, "failed logins from this device");
+  if ((await sec.take(emailKey, MIN15)) > 5) {
+    await sec.refund(ipKey);   // this attempt did nothing, so it should not use up the device's allowance
     await audit({ event: "login_locked", ip: ctx.ip, detail: { email: cleanEmail } });
     return tooMany(emailKey, "failed logins for this account");
   }
-  if (await sec.blocked(ipKey, 30)) return tooMany(ipKey, "failed logins from this device");
 
   // checks the password without starting a session (the session comes after the code)
   let user = null;
@@ -104,12 +110,12 @@ async function login(body, ctx) {
     user = null;
   }
   if (!user) {
-    await sec.hit(emailKey, MIN15);
-    await sec.hit(ipKey, MIN15);
+    // already counted above
     await audit({ event: "login_failed", ip: ctx.ip, detail: { email: cleanEmail } });
     return { status: 401, error: "invalid credentials" };
   }
   await sec.resetLimit(emailKey);
+  await sec.refund(ipKey);
 
   // replace any earlier code with a fresh one
   await destroyAll(await findAll("LoginChallenge", { user_id: user.id }));
@@ -133,7 +139,8 @@ async function verify2fa(body, ctx) {
   }
   const cleanEmail = email.toLowerCase().trim();
   const codeKey = `code:${cleanEmail}`;
-  if (await sec.blocked(codeKey, 10)) return tooMany(codeKey, "wrong codes for this account");
+  // counted first (10 tries per account in 15 minutes); a correct code clears the count below
+  if ((await sec.take(codeKey, MIN15)) > 10) return tooMany(codeKey, "wrong codes for this account");
   const user = await userByEmail(cleanEmail);
   if (!user) return { status: 401, error: "invalid code" };
 
@@ -146,7 +153,6 @@ async function verify2fa(body, ctx) {
     return { status: 429, error: "too many attempts — log in again to get a new code" };
   }
   if (!sec.checkCode(String(code).trim(), challenge.get("code_hash"))) {
-    await sec.hit(codeKey, MIN15);
     await audit({ userId: user.id, event: "login_code_failed", ip: ctx.ip });
     challenge.increment("attempts");
     await challenge.save(null, M);
@@ -172,7 +178,9 @@ async function beforeLogin(request) {
   const challenge = await findOne("LoginChallenge", { user_id: user.id });
   const verifiedAt = challenge && challenge.get("verified_at");
   if (!verifiedAt || Date.now() - verifiedAt.getTime() > VERIFIED_WINDOW_MIN * 60000) {
-    throw new Parse.Error(Parse.Error.OBJECT_NOT_FOUND, "Enter the code from your email to log in.");
+    // The same text and code Parse itself gives for a wrong password. A different message here would tell someone calling
+    // Parse's /login directly that the password they tried was right.
+    throw new Parse.Error(Parse.Error.OBJECT_NOT_FOUND, "Invalid username/password.");
   }
   await challenge.destroy(M);
   await audit({ userId: user.id, event: "login_success", ip: request.ip });
@@ -185,10 +193,8 @@ async function forget(body, ctx) {
   const message = "If that email has an account, a reset code has been sent to it.";
   const cleanEmail = email.toLowerCase().trim();
   const ipKey = `reset-ip:${ctx.ip}`, emailKey = `reset:${cleanEmail}`;
-  if (await sec.blocked(ipKey, 10)) return tooMany(ipKey, "reset requests from this device");
-  await sec.hit(ipKey, HOUR);
-  if (await sec.blocked(emailKey, 3)) return { status: 200, message };   // same reply: reveal nothing
-  await sec.hit(emailKey, HOUR);
+  if ((await sec.take(ipKey, HOUR)) > 10) return tooMany(ipKey, "reset requests from this device");   // 10 an hour per device
+  if ((await sec.take(emailKey, HOUR)) > 3) return { status: 200, message };   // 3 an hour per account; same reply: reveal nothing
 
   const user = await userByEmail(cleanEmail);
   if (!user) return { status: 200, message };
@@ -209,16 +215,19 @@ async function reset(body, ctx) {
     return { status: 400, error: "code and newPassword required" };
   }
   const pwError = passwordProblem(newPassword);
-  if (pwError) return { status: 400, error: pwError };
+  if (pwError) return { status: 400, error: `Choose a stronger password. ${pwError}` };
   const ipKey = `reset-code-ip:${ctx.ip}`;
-  if (await sec.blocked(ipKey, 10)) return tooMany(ipKey, "wrong reset codes from this device");
+  // counted first (10 tries per device in 15 minutes); a real code gives its count back
+  if ((await sec.take(ipKey, MIN15)) > 10) return tooMany(ipKey, "wrong reset codes from this device");
 
   const row = await findOne("PasswordReset", { token_hash: sec.sha256(code.trim().toLowerCase()) });
   if (!row || row.get("expires_at") <= new Date()) {
-    await sec.hit(ipKey, MIN15);
-    return { status: 400, error: "Your code is either invalid or expired. Please try again." };
+    return { status: 400, error: "Your code is either invalid or expired. Please try again." };   // already counted
   }
+  await sec.refund(ipKey);
   const user = await new Parse.Query(Parse.User).get(row.get("user_id"), M);
+  const whoPw = passwordProblem(newPassword, { email: user.get("username"), name: user.get("name") });
+  if (whoPw) return { status: 400, error: `Choose a stronger password. ${whoPw}` };
   // Order matters. Calendar subscribe links work without a session, so they are revoked and every session is ended
   // BEFORE the password changes; then sessions are ended once more (in case one was started with the old password in
   // between); the reset code is used up only at the very end. If any step fails the reset answers 500 and the code
@@ -303,6 +312,7 @@ async function logout(ctx) {
 const me = (user) => ({
   status: 200, user_id: user.user_id, email: user.user_email, name: user.user_name, role: user.role,
   ...(user.role === "physician" ? { npi: user.npi } : {}),
+  terms: legal.status(user.terms_version),
 });
 
 // ---------- admin: make someone a physician (master key only) ----------

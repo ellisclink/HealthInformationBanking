@@ -512,10 +512,13 @@ const PAP_TARGET_NIGHTS = 21;     // 70% of 30 nights
 const AHI_LIMIT = 5;              // average AHI at or above this is flagged
 const LEAK_LIMIT = 24;            // average leak above this (L/min) is flagged
 const LOW_SPO2 = 88;
+// The app shows the reading, the percent of the person's own best and the colour. It does not interpret the reading or tell anyone what
+// medicine to use: that belongs to the asthma action plan their doctor gave them. (Task: keep this wording reviewed by a clinician.)
+const NO_PLAN = " If you do not have an asthma action plan, ask your doctor for one.";
 const PEAK_ZONES = {
-  green: "Your peak flow is in the green zone. Keep taking your medicines as planned.",
-  yellow: "Your peak flow is in the yellow zone. Your airways may be narrowing. Follow your asthma action plan and call your care team if it stays low.",
-  red: "Your peak flow is in the red zone. Use your quick-relief medicine now as your action plan says and get medical help right away if it doesn't improve.",
+  green: "This reading is in your green range. Keep following the asthma action plan your doctor gave you." + NO_PLAN,
+  yellow: "This reading is in your yellow range. Follow the asthma action plan your doctor gave you for this range." + NO_PLAN,
+  red: "This reading is in your red range. Follow the asthma action plan your doctor gave you for this range. If you are struggling to breathe, call your local emergency number." + NO_PLAN,
 };
 
 const round1 = (n) => Math.round(n * 10) / 10;

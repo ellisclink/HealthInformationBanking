@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import NavigationBar from "../components/NavigationBar";
+import MedicalNotice from "../components/MedicalNotice";
 import { api } from "../api";
 
 // Pre-visit summary: pick an appointment (or none), add why you're going and your questions, and get a one-page
@@ -51,6 +52,7 @@ function PreVisit() {
           <h2>Pre-Visit Summary</h2>
           <p>Get ready for an appointment. This lists what you have recorded; it is not medical advice.</p>
         </section>
+        <MedicalNotice kind="summary" />
         {error && <p className="notice error" role="alert">{error}</p>}
 
         <section className="settings-card no-print">
@@ -88,7 +90,7 @@ function PreVisit() {
           <section className="settings-card" aria-label="Your summary">
             {summary.worth_raising.length > 0 && (
               <div className="notice">
-                <strong>Worth raising</strong>
+                <strong>Things you may want to ask about</strong> <small>(facts from your own records, not advice)</small>
                 <ul>{summary.worth_raising.map((w, i) => <li key={i}>{w}</li>)}</ul>
               </div>
             )}

@@ -24,6 +24,10 @@ import Conditions from "./pages/Conditions";
 import Emergency from "./pages/Emergency";
 import EmergencyAccess from "./pages/EmergencyAccess";
 import PreVisit from "./pages/PreVisit";
+import Terms from "./pages/Terms";
+import Privacy from "./pages/Privacy";
+import Disclaimer from "./pages/Disclaimer";
+import Footer from "./components/Footer";
 
 function App() {
   return (
@@ -34,6 +38,9 @@ function App() {
         <Route path="/register" element={<Register />} />
         {/* family & friends open a shared record here with a code, no account needed */}
         <Route path="/view" element={<ViewShared />} />
+        <Route path="/terms" element={<Terms />} />
+        <Route path="/privacy" element={<Privacy />} />
+        <Route path="/disclaimer" element={<Disclaimer />} />
         {/* emergency responders open a patient's emergency code here, no account needed */}
         <Route path="/emergency-access" element={<EmergencyAccess />} />
 
@@ -65,6 +72,7 @@ function App() {
 
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+      <Footer />
     </BrowserRouter>
   );
 }

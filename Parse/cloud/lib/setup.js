@@ -97,7 +97,8 @@ const EXTRA = {
   DeletionRequest: { ...str("user_id", "status"), immediate: B, requested_at: D, scheduled_for: D, completed_at: D, cancelled_at: D },
 };
 Object.assign(SCHEMA, EXTRA);
-const USER_FIELDS = { name: S, role: S, npi: S };
+// terms_version / terms_accepted_at: which Terms of Service and Privacy Policy the account agreed to, and when (see legal.js)
+const USER_FIELDS = { name: S, role: S, npi: S, terms_version: S, terms_accepted_at: D };
 
 // Indexes (name -> {field: 1}). Parse's schema API can only make ordinary indexes, NOT unique ones (Parse Server keeps
 // unique indexes to its own _User fields), so FeedToken.token_hash is indexed for the feed lookup and kept unique by
@@ -153,18 +154,47 @@ function startBackfill() {
     .finally(() => { backfillRun = null; });
 }
 
+// Parse's built-in classes that nothing here uses but that are readable by default: locked too, so nothing is left open.
+const ALSO_LOCK = ["_Role", "_Installation"];
+
+// Pure check (tested): given the schemas Parse reports, which classes are NOT locked to the master key?
+//   a class counts as locked when every action in LOCKED is an empty rule ({}), i.e. nobody but the master key may do it
+function lockProblems(schemas, expected = [...Object.keys(SCHEMA), "_User", ...ALSO_LOCK]) {
+  const byName = new Map((schemas || []).map((s) => [s.className, s]));
+  const problems = [];
+  for (const name of expected) {
+    const s = byName.get(name);
+    if (!s) { problems.push({ class: name, problem: "does not exist yet (run setup)" }); continue; }
+    const clp = s.classLevelPermissions || {};
+    const open = Object.keys(LOCKED).filter((action) => {
+      const rule = clp[action];
+      return !rule || Object.keys(rule).length > 0;     // missing rule = Parse's default (open); any entry = someone is allowed
+    });
+    if (open.length) problems.push({ class: name, problem: "not locked for: " + open.join(", ") });
+  }
+  return problems;
+}
+
+// verifyLocked (master key only): reads every class's permissions from Parse and lists anything that is not locked
+async function auditLocks() {
+  const schemas = await Parse.Schema.all();
+  const problems = lockProblems(schemas);
+  return { ok: problems.length === 0, checked: Object.keys(SCHEMA).length + 1 + ALSO_LOCK.length, problems };
+}
+
 async function ensureSetup(force = false) {
   if (done && !force) { startBackfill(); return { ok: true, cached: true }; }
   const result = {};
   for (const [c, fields] of Object.entries(SCHEMA)) result[c] = await ensureClass(c, fields, LOCKED, INDEXES[c]);
   result._User = await ensureClass("_User", USER_FIELDS, LOCKED);
+  for (const c of ALSO_LOCK) result[c] = await ensureClass(c, {}, LOCKED);
   done = true;
   startBackfill();
   return { ok: true, classes: result };
 }
 
 module.exports = {
-  ensureSetup, ensureClass, CLASSES, SCHEMA, INDEXES,
+  ensureSetup, ensureClass, auditLocks, lockProblems, LOCKED, CLASSES, SCHEMA, INDEXES,
   // for tests
   _backfillInFlight: () => backfillRun,
   _resetBackfill: () => { backfilled = false; backfillRun = null; backfillFailedAt = null; },

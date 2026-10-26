@@ -285,6 +285,7 @@ async function getAlerts(user) {
     status: 200, alerts, open_count: open.length, major_open_count: open.filter((a) => a.severity === "major").length,
     medications_checked: meds.length, allergies_checked: allergies.length,
     disclaimer: "These checks cover common medicines only and do not replace a pharmacist's review.",
+    reference: { version: R.REFERENCE_VERSION, note: R.WARNING_LIST_NOTE },
   };
 }
 
@@ -304,7 +305,8 @@ async function check(body, user) {
   warnings.sort((x, y) => SEVERITY_RANK[x.severity] - SEVERITY_RANK[y.severity]);
   const info = classifyMedication(ref, name, brand);
   return { status: 200, medication_name: name, drug_classes: [...info.classes].map((c) => className(ref, c)),
-    recognized: info.drugs.size > 0, warnings, safe_to_add_without_warning: warnings.length === 0 };
+    recognized: info.drugs.size > 0, warnings, safe_to_add_without_warning: warnings.length === 0,
+    reference: { version: R.REFERENCE_VERSION, note: R.WARNING_LIST_NOTE } };
 }
 
 // POST /safety/alerts/:id/acknowledge

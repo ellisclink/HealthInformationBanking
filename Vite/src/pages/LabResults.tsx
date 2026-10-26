@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import AlertBanner from "../components/AlertBanner";
 import NavigationBar from "../components/NavigationBar";
+import MedicalNotice from "../components/MedicalNotice";
 import { api, apiFile, apiUpload, localDate } from "../api";
 
 // Lab results: upload the PDF the lab gave you, type in the numbers, and see which
@@ -45,8 +46,8 @@ const FLAG_INFO: Record<string, { label: string; icon: string }> = {
   normal: { label: "Normal", icon: "✓" },
   high: { label: "High", icon: "↑" },
   low: { label: "Low", icon: "↓" },
-  critical_high: { label: "Critical high", icon: "⚠" },
-  critical_low: { label: "Critical low", icon: "⚠" },
+  critical_high: { label: "Far above range", icon: "⚠" },
+  critical_low: { label: "Far below range", icon: "⚠" },
   abnormal: { label: "Abnormal", icon: "!" },
 };
 
@@ -327,6 +328,7 @@ function LabResults() {
           <h2>Lab Results</h2>
           <p>Keep your lab reports in one place and see which results are out of range.</p>
         </section>
+        <MedicalNotice kind="results" />
 
         {summary && (
           <div className="med-stats">
@@ -355,7 +357,7 @@ function LabResults() {
           <section id="panel-attention" role="tabpanel" aria-labelledby="tab-attention">
             {summary.urgent_count > 0 && (
               <AlertBanner type="warning"
-                message="One or more results are far outside the normal range. Contact your doctor promptly, or call 911 if you feel very unwell." />
+                message="One or more results are far outside the usual range. Contact your doctor soon. If you feel very unwell, get urgent help." />
             )}
             {summary.tests_tracked === 0 ? (
               <p>No results yet. Upload a PDF or add results to see what is in and out of range.</p>

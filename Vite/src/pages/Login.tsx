@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
+import PasswordInput from "../components/PasswordInput";
+import { checkPassword } from "../password";
 import { api, dashboardPath, isLoggedIn, type Role } from '../api';
 import Parse from '../parse';
 
@@ -78,7 +80,7 @@ function Login() {
   async function handleReset(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!resetCode.trim()) { setError("Enter the reset code from your email."); return; }
-    if (newPassword.length < 8) { setError("Password must be at least 8 characters."); return; }
+    if (!checkPassword(newPassword, { email }).ok) { setError("Please choose a stronger password. The checklist shows what is missing."); return; }
     if (newPassword !== confirmPassword) { setError("Passwords do not match."); return; }
     setBusy(true); setError("");
     try {
@@ -121,11 +123,7 @@ function Login() {
                 value={email} onChange={e => setEmail(e.target.value)} />
             </div>
 
-            <div className="form-group">
-              <label htmlFor="password">Password</label>
-              <input id="password" name="password" type="password" autoComplete="current-password"
-                placeholder="Enter your password" value={password} onChange={e => setPassword(e.target.value)} />
-            </div>
+            <PasswordInput id="password" label="Password" value={password} onChange={setPassword} autoComplete="current-password" placeholder="Enter your password" />
 
             <button className="primary-button full-width" type="submit" disabled={busy}>
               {busy ? 'Signing in…' : 'Log In'}
@@ -157,16 +155,9 @@ function Login() {
               <label htmlFor="reset-code">Reset code</label>
               <input id="reset-code" autoComplete="one-time-code" value={resetCode} onChange={e => setResetCode(e.target.value)} />
             </div>
-            <div className="form-group">
-              <label htmlFor="new-password">New password</label>
-              <input id="new-password" type="password" autoComplete="new-password" placeholder="At least 8 characters"
-                value={newPassword} onChange={e => setNewPassword(e.target.value)} />
-            </div>
-            <div className="form-group">
-              <label htmlFor="confirm-new-password">Confirm new password</label>
-              <input id="confirm-new-password" type="password" autoComplete="new-password"
-                value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} />
-            </div>
+            <PasswordInput id="new-password" label="New password" value={newPassword} onChange={setNewPassword} autoComplete="new-password" meter who={{ email }} />
+            <PasswordInput id="confirm-new-password" label="Confirm new password" value={confirmPassword} onChange={setConfirmPassword} autoComplete="new-password" />
+            {confirmPassword.length > 0 && newPassword !== confirmPassword && <small className="form-hint form-hint-error">Passwords do not match.</small>}
             <button className="primary-button full-width" disabled={busy}>{busy ? "Saving…" : "Reset password"}</button>
             <button type="button" className="text-button" onClick={() => switchMode("forgot")}>Send a new code</button>
           </form>

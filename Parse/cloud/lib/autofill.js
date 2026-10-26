@@ -476,7 +476,8 @@ async function purgeOldDrafts(userId) {
 
 // POST /documents/autofill
 async function extract(body, user, ctx) {
-  if (sec.keyIsInvalid()) return fail(503, sec.KEY_INVALID);
+  const blocked = sec.uploadBlock();
+  if (blocked) return fail(503, blocked);
   const b64 = typeof body.file_base64 === "string" ? body.file_base64.replace(/\s+/g, "") : "";
   if (!b64) return fail(400, "Choose a PDF file to auto-fill from");
   if (b64.length > MAX_B64) return fail(413, "That file is too large (8 MB max)");

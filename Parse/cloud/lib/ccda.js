@@ -1,7 +1,9 @@
 // Parse/cloud/lib/ccda.js
 // Parses a C-CDA XML file into plain JSON. Does NOT write to the database.
 // Never log the XML or the parsed result (health data).
-const { transform } = require("camaro");
+// camaro starts a background thread and needs Node 20+, so it is loaded only when a C-CDA file is actually read (not when Cloud Code starts)
+let transform = null;
+const loadCamaro = () => (transform = transform || require("camaro").transform);
 
 const MAX_BYTES = 8 * 1024 * 1024;
 const ln = (n) => `*[local-name()='${n}']`;
@@ -60,7 +62,7 @@ async function parseCcda(buffer) {
   if (/<!DOCTYPE|<!ENTITY/i.test(head)) throw new Error("This XML file isn't allowed");
 
   let r;
-  try { r = await transform(buffer, template); }
+  try { r = await loadCamaro()(buffer, template); }
   catch { throw new Error("That file isn't valid XML"); }
   if (!Number(r.isCcda)) throw new Error("That XML file isn't a C-CDA document");
 

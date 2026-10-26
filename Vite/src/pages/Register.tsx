@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api";
+import PasswordInput from "../components/PasswordInput";
+import { checkPassword } from "../password";
+import { MIN_AGE } from "../legal";
 
-// Matches the checks in POST /api/register (Node/2FAapi.js)
-const MIN_PASSWORD = 8;
-const MAX_PASSWORD = 72; // bcrypt ignores anything past 72 bytes
+// The password rules are in password.ts (the server enforces the same ones: Parse/cloud/lib/password.js)
 
 function Register() {
   const navigate = useNavigate();
@@ -15,6 +16,7 @@ function Register() {
     password: "",
     confirmPassword: "",
   });
+  const [agreed, setAgreed] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -26,11 +28,10 @@ function Register() {
   function validate(): string {
     if (!formData.name.trim()) return "Please enter your full name.";
     if (!formData.email.trim()) return "Please enter your email address.";
-    if (formData.password.length < MIN_PASSWORD)
-      return `Password must be at least ${MIN_PASSWORD} characters.`;
-    if (new TextEncoder().encode(formData.password).length > MAX_PASSWORD)
-      return `Password must be ${MAX_PASSWORD} characters or fewer.`;
+    if (!checkPassword(formData.password, { email: formData.email, name: formData.name }).ok)
+      return "Please choose a stronger password. The checklist under the password box shows what is missing.";
     if (formData.password !== formData.confirmPassword) return "Passwords do not match.";
+    if (!agreed) return `Please agree to the Terms of Service, Privacy Policy and Medical Disclaimer, and confirm you are ${MIN_AGE} or older.`;
     return "";
   }
 
@@ -52,6 +53,7 @@ function Register() {
           name: formData.name.trim(),
           email: formData.email.trim(),
           password: formData.password,
+          accepted_terms: true,
         }),
       });
       // Send them to the login page with their email filled in
@@ -105,39 +107,20 @@ function Register() {
             />
           </div>
 
-          <div className="form-group">
-            <label htmlFor="password">Password</label>
-            <input
-              id="password"
-              name="password"
-              type="password"
-              autoComplete="new-password"
-              placeholder={`At least ${MIN_PASSWORD} characters`}
-              value={formData.password}
-              onChange={handleChange}
-              aria-describedby="password-hint"
-            />
-            <small id="password-hint" className="form-hint">
-              Use {MIN_PASSWORD}+ characters. A passphrase works well.
-            </small>
-          </div>
+          <PasswordInput id="password" label="Password" value={formData.password} autoComplete="new-password" meter
+            who={{ email: formData.email, name: formData.name }} onChange={(v) => setFormData((d) => ({ ...d, password: v }))} />
+          <small className="form-hint">A passphrase of several words works well, e.g. three or four unrelated words. Use a password you don't use anywhere else.</small>
 
-          <div className="form-group">
-            <label htmlFor="confirmPassword">Confirm Password</label>
-            <input
-              id="confirmPassword"
-              name="confirmPassword"
-              type="password"
-              autoComplete="new-password"
-              placeholder="Re-enter your password"
-              value={formData.confirmPassword}
-              onChange={handleChange}
-              aria-invalid={passwordsMismatch}
-            />
-            {passwordsMismatch && (
-              <small className="form-hint form-hint-error">Passwords do not match.</small>
-            )}
-          </div>
+          <PasswordInput id="confirmPassword" label="Confirm Password" value={formData.confirmPassword} autoComplete="new-password"
+            placeholder="Re-enter your password" onChange={(v) => setFormData((d) => ({ ...d, confirmPassword: v }))} />
+          {passwordsMismatch && (
+            <small className="form-hint form-hint-error">Passwords do not match.</small>
+          )}
+
+          <label className="check-row">
+            <input type="checkbox" checked={agreed} onChange={(e) => setAgreed(e.target.checked)} />
+            <span>I am {MIN_AGE} or older and I agree to the <Link to="/terms" target="_blank">Terms of Service</Link>, <Link to="/privacy" target="_blank">Privacy Policy</Link> and <Link to="/disclaimer" target="_blank">Medical Disclaimer</Link>. I understand this is not medical advice and not for emergencies.</span>
+          </label>
 
           <button className="primary-button full-width" type="submit" disabled={busy}>
             {busy ? "Creating account…" : "Create Account"}

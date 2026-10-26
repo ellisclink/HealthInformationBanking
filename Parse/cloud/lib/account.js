@@ -16,6 +16,7 @@
 const crypto = require("crypto");
 const sec = require("./security");
 const auth = require("./auth");
+const legal = require("./legal");
 const { SCHEMA } = require("./setup");
 const { M, findAll, create, save, destroyAll, audit, fail } = require("./db");
 
@@ -198,4 +199,14 @@ async function processDeletions() {
   return { processed: done.length, failed: failed.length };
 }
 
-module.exports = { exportData, deletionStatus, requestDeletion, cancelDeletion, processDeletions, purgeUser, GRACE_DAYS, CONFIRM_PHRASE };
+// POST /account/accept-terms {accepted: true} — for accounts made before the Terms existed, and whenever the version changes
+async function acceptTerms(body, user, ctx) {
+  if (!body || body.accepted !== true) return fail(400, "Please tick the box to agree to the Terms of Service and Privacy Policy");
+  const u = await new Parse.Query(Parse.User).get(user.user_id, M);
+  u.set(legal.acceptanceFields());
+  await u.save(null, M);
+  await audit({ userId: user.user_id, event: "terms_accepted", ip: ctx.ip, detail: { version: legal.TERMS_VERSION } });
+  return { status: 200, message: "Thank you", terms: legal.status(legal.TERMS_VERSION) };
+}
+
+module.exports = { acceptTerms, exportData, deletionStatus, requestDeletion, cancelDeletion, processDeletions, purgeUser, GRACE_DAYS, CONFIRM_PHRASE };
