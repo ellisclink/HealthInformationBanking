@@ -80,7 +80,7 @@ function Privacy() {
       <h3 id="who">4. Who can see your information</h3>
       <ul>
         <li><strong>You.</strong></li>
-        <li><strong>People you share with.</strong> Anyone with a sharing code you create can see the sections you chose until the code expires or you revoke it. Provider codes open only for physician accounts. A physician or other person who sees your information gets a view of it and may keep a copy. They handle it under their own rules, not ours.</li>
+        <li><strong>People you share with.</strong> Anyone with a sharing code you create can see the sections you chose until the code expires or you revoke it. A person who sees your information gets a view of it and may keep a copy. They handle it under their own rules, not ours.</li>
         <li><strong>Anyone with your emergency code,</strong> if you turn it on, for the sections you chose and your recorded wishes.</li>
         <li><strong>Anyone with a calendar subscribe link you create,</strong> for the event titles and times in it.</li>
         <li><strong>Our service providers,</strong> only as needed to run the service (section 5).</li>

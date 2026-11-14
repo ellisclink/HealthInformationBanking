@@ -18,17 +18,16 @@ const EXPIRATION_OPTIONS = [
   { hours: 24, label: "24 Hours" },
   { hours: 168, label: "7 Days" },
 ];
-const AUDIENCE_LABEL: Record<ShareAudience, string> = { provider: "Healthcare provider", family: "Family or friend" };
+// old "provider" codes still show in the lists (they no longer open; the server refuses them)
+const AUDIENCE_LABEL: Record<ShareAudience, string> = { provider: "Old doctor code (no longer works)", family: "Family or friend" };
 const sectionNames = (list: ShareSection[] | null) =>
   (list ?? []).map((k) => SHARE_SECTIONS.find((s) => s.key === k)?.label ?? k).join(", ");
 
-// Patients choose who each code is for and what it shows. Everything shared is
-// read-only. Provider codes only open for a logged-in physician; family codes open
-// for anyone with the code, who must give their name. The "Who viewed your records"
+// Patients choose what each code shows. Everything shared is read-only. A code opens
+// for anyone who has it, who must give their name. The "Who viewed your records"
 // list shows every open (older "verify" entries from before D-015 still display).
 function ShareRecords() {
   const [expiresHours, setExpiresHours] = useState(24);
-  const [audience, setAudience] = useState<ShareAudience>("provider");
   const [sections, setSections] = useState<ShareSection[]>(SHARE_SECTIONS.map((s) => s.key));
   const [label, setLabel] = useState("");
   const [newCode, setNewCode] = useState<Share | null>(null);
@@ -61,7 +60,7 @@ function ShareRecords() {
     setBusy(true); setError(""); setMessage("");
     try {
       const data = await api<{ shareCode: string; expiresInHours: number; audience: ShareAudience; sections: ShareSection[]; label: string | null }>("/share", {
-        method: "POST", body: JSON.stringify({ expiresHours, audience, sections, label: label.trim() || null }),
+        method: "POST", body: JSON.stringify({ expiresHours, sections, label: label.trim() || null }),
       });
       setNewCode({
         share_code: data.shareCode, audience: data.audience, sections: data.sections, label: data.label,
@@ -109,26 +108,15 @@ function ShareRecords() {
 
         <section className="page-heading">
           <h2>Share Medical Records</h2>
-          <p>Make a temporary, read-only code for a doctor or for family and friends.</p>
+          <p>Make a temporary, read-only code for family and friends.</p>
         </section>
 
         {error && <p className="notice error" role="alert">{error}</p>}
         {message && !error && <p className="notice success" role="status">{message}</p>}
 
         <section className="share-card">
-          <fieldset className="checkbox-group">
-            <legend>Who is this code for?</legend>
-            {(Object.keys(AUDIENCE_LABEL) as ShareAudience[]).map((a) => (
-              <label key={a}>
-                <input type="radio" name="audience" value={a} checked={audience === a} onChange={() => setAudience(a)} />
-                {AUDIENCE_LABEL[a]}
-              </label>
-            ))}
-          </fieldset>
           <p className="form-hint">
-            {audience === "provider"
-              ? "Only a doctor logged in with a physician account can open it. They can read it but can't change anything."
-              : "Anyone with the code can read it without an account. They'll be asked for their name, and you'll see who viewed it."}
+            Anyone with the code can read it without an account. They'll be asked for their name, and you'll see who viewed it.
           </p>
 
           <fieldset className="checkbox-group">
@@ -143,7 +131,7 @@ function ShareRecords() {
 
           <div className="form-group">
             <label htmlFor="share-label">Note for yourself (optional)</label>
-            <input id="share-label" maxLength={100} placeholder={audience === "provider" ? "e.g. Dr. Lee, cardiology" : "e.g. Mom"}
+            <input id="share-label" maxLength={100} placeholder="e.g. Mom"
               value={label} onChange={(e) => setLabel(e.target.value)} />
           </div>
 
@@ -164,12 +152,10 @@ function ShareRecords() {
 
           {newCode && (
             <div className="generated-code">
-              <p>Your {newCode.audience === "provider" ? "provider" : "family & friends"} sharing code is:</p>
+              <p>Your sharing code is:</p>
               <strong className="share-code">{newCode.share_code}</strong>
               <p>Shows: {sectionNames(newCode.sections)}. Expires {new Date(newCode.expires_at).toLocaleString()}.</p>
-              {newCode.audience === "family" && (
-                <p>They can open it at <strong>{familyLink}</strong></p>
-              )}
+              <p>They can open it at <strong>{familyLink}</strong></p>
 
               <div className="qr-placeholder">
                 <span>QR Code Placeholder</span>
@@ -178,9 +164,7 @@ function ShareRecords() {
               <button className="secondary-button" type="button" onClick={() => copy(newCode.share_code)}>
                 Copy Code
               </button>
-              {newCode.audience === "family" && (
-                <> <button className="secondary-button" type="button" onClick={() => copy(familyLink)}>Copy Link</button></>
-              )}
+              {" "}<button className="secondary-button" type="button" onClick={() => copy(familyLink)}>Copy Link</button>
             </div>
           )}
         </section>
@@ -221,7 +205,7 @@ function ShareRecords() {
                   {log.map((e, i) => (
                     <tr key={i}>
                       <td>{new Date(e.accessed_at).toLocaleString()}</td>
-                      <td>{e.viewer_name}{e.viewer_npi && <> (NPI {e.viewer_npi})</>}<div className="shared-sub">{AUDIENCE_LABEL[e.audience]}</div></td>
+                      <td>{e.viewer_name}{e.viewer_npi && <> (NPI {e.viewer_npi})</>}<div className="shared-sub">{AUDIENCE_LABEL[e.audience] ?? e.audience}</div></td>
                       <td>{e.action === "verify" ? "Verified your record" : <>Viewed {sectionNames(e.sections)}</>}</td>
                       <td><span className="share-code">{e.share_code}</span>{e.label && <div className="shared-sub">{e.label}</div>}</td>
                     </tr>

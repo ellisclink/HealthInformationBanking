@@ -3,8 +3,9 @@ import AlertBanner from "../components/AlertBanner";
 import HealthHistoryForm from "../components/HealthHistoryForm";
 import NavigationBar from "../components/NavigationBar";
 import SearchBar from "../components/SearchBar";
-import { api, currentRole } from "../api";
+import { api } from "../api";
 import { normalizeHealthHistory } from "../healthHistory";
+import { listMedications, type Med } from "../data/medications";
 
 // One row of the Records List, built from the patient's own data:
 //   - the Health History form (conditions, medications, allergies, immunizations, surgeries)
@@ -18,18 +19,11 @@ type ListRecord = {
   more: [string, string][];   // label/value pairs shown by "View Details"
 };
 
-type TrackedMed = {
-  medication_id: number; medication_name: string; medication_type?: string; strength: string | null; strength_unit: string | null;
-  dose_amount: string; dose_unit: string; frequency: string; status: string; purpose: string | null;
-  instructions: string | null; pharmacy_name: string | null; prescriber_name: string | null;
-  quantity_on_hand: string; refills_remaining: number | null; start_date: string | null; end_date: string | null;
-};
-
 const CATEGORIES = ["Condition", "Medication", "Allergy", "Immunization", "Procedure"] as const;
-const num = (v: string | null) => (v == null || v === "" ? "" : String(Number(v)));
+const num = (v: number | string | null) => (v == null || v === "" ? "" : String(Number(v)));
 const pretty = (s: string) => s.replaceAll("_", " ");
 
-function buildRecords(formData: unknown, formSaved: string | null, meds: TrackedMed[]): ListRecord[] {
+function buildRecords(formData: unknown, formSaved: string | null, meds: Med[]): ListRecord[] {
   const h = normalizeHealthHistory(formData);
   const saved = formSaved ? new Date(formSaved).toLocaleDateString() : "";
   const fromForm: [string, string] = ["Source", "Health History form"];
@@ -92,9 +86,8 @@ function buildRecords(formData: unknown, formSaved: string | null, meds: Tracked
 type Tab = "form" | "list";
 
 function MedicalRecords() {
-  // Patients see their Health History form first; physicians don't have one
-  const isPatient = currentRole() === "patient";
-  const [tab, setTab] = useState<Tab>(isPatient ? "form" : "list");
+  // the Health History form is shown first
+  const [tab, setTab] = useState<Tab>("form");
   const [records, setRecords] = useState<ListRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -104,20 +97,20 @@ function MedicalRecords() {
 
   // Reload the list whenever its tab is opened, so a just-saved form shows up
   useEffect(() => {
-    if (tab !== "list" || !isPatient) return;
+    if (tab !== "list") return;
     let cancelled = false;
     Promise.all([
       api<{ data: unknown; updated_at: string | null }>("/records"),
-      api<{ medications: TrackedMed[] }>("/medications"),
+      listMedications(),
     ])
-      .then(([rec, meds]) => { if (!cancelled) { setRecords(buildRecords(rec.data, rec.updated_at, meds.medications)); setError(""); } })
+      .then(([rec, meds]) => { if (!cancelled) { setRecords(buildRecords(rec.data, rec.updated_at, meds)); setError(""); } })
       .catch((e) => { if (!cancelled) setError((e as Error).message); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [tab, isPatient]);
+  }, [tab]);
 
   function openTab(next: Tab) {
-    if (next === "list" && isPatient) setLoading(true);
+    if (next === "list") setLoading(true);
     setTab(next);
   }
 
@@ -137,19 +130,17 @@ function MedicalRecords() {
         </section>
 
         <div className="tab-bar" role="tablist" aria-label="Medical records sections">
-          {isPatient && (
-            <button type="button" role="tab" id="tab-form" aria-controls="panel-form" aria-selected={tab === "form"}
-              className={tab === "form" ? "tab active" : "tab"} onClick={() => openTab("form")}>
-              Health History Form
-            </button>
-          )}
+          <button type="button" role="tab" id="tab-form" aria-controls="panel-form" aria-selected={tab === "form"}
+            className={tab === "form" ? "tab active" : "tab"} onClick={() => openTab("form")}>
+            Health History Form
+          </button>
           <button type="button" role="tab" id="tab-list" aria-controls="panel-list" aria-selected={tab === "list"}
             className={tab === "list" ? "tab active" : "tab"} onClick={() => openTab("list")}>
             Records List
           </button>
         </div>
 
-        {tab === "form" && isPatient && (
+        {tab === "form" && (
           <section id="panel-form" role="tabpanel" aria-labelledby="tab-form">
             <HealthHistoryForm />
           </section>
@@ -157,64 +148,58 @@ function MedicalRecords() {
 
         {tab === "list" && (
           <section id="panel-list" role="tabpanel" aria-labelledby="tab-list">
-            {!isPatient ? (
-              <AlertBanner message="Physicians view a patient's records by entering their sharing code on the Physician Dashboard." type="info" />
-            ) : (
-              <>
-                <AlertBanner message="Everything here comes from your Health History form and your Medications tracker." type="info" />
-                {error && <p className="notice error" role="alert">{error}</p>}
+            <AlertBanner message="Everything here comes from your Health History form and your Medications tracker." type="info" />
+            {error && <p className="notice error" role="alert">{error}</p>}
 
-                <div className="records-tools">
-                  <SearchBar
-                    value={searchTerm}
-                    onChange={(event: React.ChangeEvent<HTMLInputElement>) => setSearchTerm(event.target.value)}
-                    placeholder="Search medical records"
-                  />
+            <div className="records-tools">
+              <SearchBar
+                value={searchTerm}
+                onChange={(event: React.ChangeEvent<HTMLInputElement>) => setSearchTerm(event.target.value)}
+                placeholder="Search medical records"
+              />
 
-                  <div className="form-group">
-                    <label htmlFor="record-category">Category</label>
-                    <select id="record-category" value={category} onChange={(event) => setCategory(event.target.value)}>
-                      <option value="All">All Records</option>
-                      {CATEGORIES.map((c) => <option key={c} value={c}>{c === "Allergy" ? "Allergies" : `${c}s`}</option>)}
-                    </select>
-                  </div>
-                </div>
+              <div className="form-group">
+                <label htmlFor="record-category">Category</label>
+                <select id="record-category" value={category} onChange={(event) => setCategory(event.target.value)}>
+                  <option value="All">All Records</option>
+                  {CATEGORIES.map((c) => <option key={c} value={c}>{c === "Allergy" ? "Allergies" : `${c}s`}</option>)}
+                </select>
+              </div>
+            </div>
 
-                <div className="records-list">
-                  {loading ? <p role="status">Loading your records…</p>
-                    : records.length === 0 ? (
-                      <p>No records yet. Fill out the Health History Form or add a medication to see them here.</p>
-                    ) : filteredRecords.length === 0 ? (
-                      <p>No medical records match your search.</p>
-                    ) : filteredRecords.map((record) => {
-                      const open = openId === record.id;
-                      return (
-                        <article className="medical-record-item" key={record.id}>
-                          <div>
-                            <span className="record-category">{record.category}</span>
-                            <h3>{record.name}</h3>
-                            {record.details && <p>{record.details}</p>}
-                            {record.date && <p className="record-date">{record.date}</p>}
-                            {open && (
-                              <dl className="record-details" id={`record-details-${record.id}`}>
-                                {record.more.map(([label, value]) => (
-                                  <div key={label}><dt>{label}</dt><dd>{value}</dd></div>
-                                ))}
-                              </dl>
-                            )}
-                          </div>
+            <div className="records-list">
+              {loading ? <p role="status">Loading your records…</p>
+                : records.length === 0 ? (
+                  <p>No records yet. Fill out the Health History Form or add a medication to see them here.</p>
+                ) : filteredRecords.length === 0 ? (
+                  <p>No medical records match your search.</p>
+                ) : filteredRecords.map((record) => {
+                  const open = openId === record.id;
+                  return (
+                    <article className="medical-record-item" key={record.id}>
+                      <div>
+                        <span className="record-category">{record.category}</span>
+                        <h3>{record.name}</h3>
+                        {record.details && <p>{record.details}</p>}
+                        {record.date && <p className="record-date">{record.date}</p>}
+                        {open && (
+                          <dl className="record-details" id={`record-details-${record.id}`}>
+                            {record.more.map(([label, value]) => (
+                              <div key={label}><dt>{label}</dt><dd>{value}</dd></div>
+                            ))}
+                          </dl>
+                        )}
+                      </div>
 
-                          <button className="secondary-button" type="button" aria-expanded={open}
-                            aria-controls={`record-details-${record.id}`}
-                            onClick={() => setOpenId(open ? null : record.id)}>
-                            {open ? "Hide Details" : "View Details"}
-                          </button>
-                        </article>
-                      );
-                    })}
-                </div>
-              </>
-            )}
+                      <button className="secondary-button" type="button" aria-expanded={open}
+                        aria-controls={`record-details-${record.id}`}
+                        onClick={() => setOpenId(open ? null : record.id)}>
+                        {open ? "Hide Details" : "View Details"}
+                      </button>
+                    </article>
+                  );
+                })}
+            </div>
           </section>
         )}
       </main>

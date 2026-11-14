@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import AlertBanner from "../components/AlertBanner";
 import NavigationBar from "../components/NavigationBar";
 import { api, localDate } from "../api";
+import { listMedications } from "../data/medications";
 
 // Safe disposal: leftover medicines with step-by-step guidance, a log of what the
 // patient has already gotten rid of, and a look-up for any other medicine.
@@ -10,6 +11,7 @@ import { api, localDate } from "../api";
 //   GET  /disposal/guidance  -> guidance for any medicine name
 //   GET  /disposal/methods   -> the eight disposal methods
 //   GET/POST /disposal/logs, DELETE /disposal/logs/:id -> the disposal history
+// The medicine pick-list comes from listMedications() (data/medications.ts, Parse SDK).
 // All guidance is plain text from the server and is shown as text only.
 
 type Link = { key: string; label: string; url: string };
@@ -94,11 +96,11 @@ function Disposal() {
     Promise.all([
       api<{ medications: Due[]; note: string }>("/disposal/due"),
       api<{ logs: DisposalLog[] }>("/disposal/logs"),
-      api<{ medications: MedOption[] }>("/medications").catch(() => ({ medications: [] as MedOption[] })),
+      listMedications().catch(() => [] as MedOption[]),
       api<{ methods: Method[] }>("/disposal/methods").catch(() => ({ methods: [] as Method[] })),
     ])
       .then(([d, l, m, t]) => {
-        setDue(d.medications); setNote(d.note); setLogs(l.logs); setMeds(m.medications);
+        setDue(d.medications); setNote(d.note); setLogs(l.logs); setMeds(m);
         if (t.methods?.length) setMethods(t.methods);
       })
       .catch((e) => setError((e as Error).message))
@@ -147,7 +149,7 @@ function Disposal() {
     try {
       await Promise.all([
         loadLists(),
-        api<{ medications: MedOption[] }>("/medications").then((x) => setMeds(x.medications)).catch(() => {}),
+        listMedications().then(setMeds).catch(() => {}),
       ]);
     } catch (e) { setRefreshError(`Saved, but the lists could not refresh: ${(e as Error).message}`); }
     finally { setBusy(false); }

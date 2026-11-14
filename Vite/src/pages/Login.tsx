@@ -51,8 +51,8 @@ function Login() {
   async function handleVerify(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError("");
     try {
-      // The server says which kind of account this is. There's no "Account Type"
-      // dropdown anymore: picking "Physician" used to be all it took to get in as one.
+      // The server says which kind of account this is (every account is a patient).
+      // There's no "Account Type" dropdown: the role is never picked by the user.
       const data = await api<{ role: Role; name: string }>('/verify-2fa', {
         method: 'POST', body: JSON.stringify({ email: email.trim(), code: code.trim() }),
       });

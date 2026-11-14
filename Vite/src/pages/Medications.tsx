@@ -4,28 +4,21 @@ import AlertBanner from "../components/AlertBanner";
 import NavigationBar from "../components/NavigationBar";
 import MedicalNotice from "../components/MedicalNotice";
 import { api, localDate } from "../api";
+import {
+  listMedications, medicationSummary, getHistory, addMedication as saveMedication, updateMedication, deleteMedication,
+  logDose as saveDose, addRefill as saveRefill,
+} from "../data/medications";
+import type { Med, Dose, Refill, Summary, NewMedication } from "../data/medications";
 
 // Medication inventory: what the patient takes and how many pills they have.
-//   "Took dose"  -> POST /api/medications/:id/doses   (subtracts the dose from the count)
-//   "Add refill" -> POST /api/medications/:id/refills (adds to the count)
-// The server does the counting, low-stock check and run-out estimate.
+// The page talks to Parse directly through data/medications.ts (Cloud Code guards every request).
+//   "Took dose"  -> a new DoseLog (the server subtracts the dose from the count)
+//   "Add refill" -> a new Refill  (the server adds to the count)
+// The low-stock check and run-out estimate are in data/medicationMath.ts.
 // Safety: GET /api/safety/alerts checks every medication against the allergies on the
 // Health History form and against each other; POST /api/safety/check runs the same check
 // on a new medication before it is saved.
 
-type Med = {
-  medication_id: number; medication_name: string; brand_name: string | null;
-  medication_type: "prescription" | "non_prescription";
-  strength: string | null; strength_unit: string | null; dosage_form: string | null;
-  dose_amount: string; dose_unit: string; frequency: string;
-  instructions: string | null; purpose: string | null; pharmacy_name: string | null;
-  status: "active" | "paused" | "completed" | "discontinued";
-  quantity_on_hand: string; refill_threshold: string | null; refills_remaining: number | null;
-  last_refill_date: string | null;
-  days_supply: number | null; estimated_run_out_date: string | null; low_stock: boolean;
-};
-type Dose = { dose_log_id: number; taken_at: string; dose_status: string; quantity: string };
-type Refill = { refill_id: number; refill_date: string; quantity_added: string; pharmacy_name: string | null };
 type SafetyWarning = {
   alert_type: "allergy" | "cross_reactivity" | "interaction" | "duplicate_therapy";
   severity: "major" | "moderate" | "minor"; title: string; message: string; advice: string;
@@ -48,7 +41,6 @@ function WarningBox({ w, children }: { w: SafetyWarning; children?: React.ReactN
     </div>
   );
 }
-type Summary = { active_count: number; needs_refill: { medication_id: number }[]; overall_adherence_7_day_pct: number | null };
 
 const FREQUENCIES: [string, string][] = [
   ["once_daily", "Once a day"], ["twice_daily", "Twice a day"], ["three_times_daily", "3 times a day"],
@@ -59,7 +51,7 @@ const FORMS = ["tablet", "capsule", "liquid", "injection", "inhaler", "patch", "
 const ALWAYS = "Don't stop or change a medicine on your own.";
 const freqLabel = (f: string) => FREQUENCIES.find(([k]) => k === f)?.[1] ?? f;
 const n = (v: string | number | null | undefined) => (v == null || v === "" ? "" : String(Number(v)));
-const plural = (count: string, unit: string) => `${n(count)} ${unit}${Number(count) === 1 ? "" : "s"}`;
+const plural = (count: string | number, unit: string) => `${n(count)} ${unit}${Number(count) === 1 ? "" : "s"}`;
 
 const emptyNew = {
   medication_type: "prescription" as "prescription" | "non_prescription",
@@ -68,6 +60,17 @@ const emptyNew = {
   quantity_on_hand: "", refill_threshold: "7", refills_remaining: "", pharmacy_name: "",
   purpose: "", instructions: "", start_date: localDate(),
 };
+
+// safety warnings are extra: if that module isn't installed, the page still works
+const loadAlerts = () => api<{ alerts: SafetyAlert[] }>("/safety/alerts").then((r) => r.alerts).catch(() => [] as SafetyAlert[]);
+// (the version and note about the built-in warning list are fixed text on the page; the server sends the same text in `reference`)
+
+// the list, the summary (built from the list) and the safety alerts
+async function fetchAll() {
+  const [list, al] = await Promise.all([listMedications(), loadAlerts()]);
+  const sum = await medicationSummary(list);
+  return { list, sum, al };
+}
 
 function Medications() {
   const navigate = useNavigate();
@@ -80,10 +83,10 @@ function Medications() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [show, setShow] = useState<"active" | "all">("active");
   const [adding, setAdding] = useState(params.has("add"));
-  const [draft, setDraft] = useState({ ...emptyNew, medication_type: startType });
-  const [refillFor, setRefillFor] = useState<number | null>(null);
+  const [draft, setDraft] = useState<typeof emptyNew>({ ...emptyNew, medication_type: startType });
+  const [refillFor, setRefillFor] = useState<string | null>(null);
   const [refillQty, setRefillQty] = useState("");
-  const [historyFor, setHistoryFor] = useState<number | null>(null);
+  const [historyFor, setHistoryFor] = useState<string | null>(null);
   const [history, setHistory] = useState<{ doses: Dose[]; refills: Refill[] }>({ doses: [], refills: [] });
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -93,22 +96,14 @@ function Medications() {
   const [showAcked, setShowAcked] = useState(false);
   const [checkWarnings, setCheckWarnings] = useState<SafetyWarning[] | null>(null);
 
-  // safety warnings are extra: if that module isn't installed, the page still works
-  const loadAlerts = () => api<{ alerts: SafetyAlert[] }>("/safety/alerts").then((r) => r.alerts).catch(() => [] as SafetyAlert[]);
-  // (the version and note about the built-in warning list are fixed text on the page; the server sends the same text in `reference`)
-
   async function load() {
-    const [list, sum, al] = await Promise.all([
-      api<{ medications: Med[] }>("/medications"),
-      api<Summary>("/medications/summary"),
-      loadAlerts(),
-    ]);
-    setMeds(list.medications); setSummary(sum); setAlerts(al);
+    const { list, sum, al } = await fetchAll();
+    setMeds(list); setSummary(sum); setAlerts(al);
   }
 
   useEffect(() => {
-    Promise.all([api<{ medications: Med[] }>("/medications"), api<Summary>("/medications/summary"), loadAlerts()])
-      .then(([list, sum, al]) => { setMeds(list.medications); setSummary(sum); setAlerts(al); })
+    fetchAll()
+      .then(({ list, sum, al }) => { setMeds(list); setSummary(sum); setAlerts(al); })
       .catch((e) => setError((e as Error).message))
       .finally(() => setLoading(false));
   }, []);
@@ -128,7 +123,7 @@ function Medications() {
     event.preventDefault();
     if (!draft.medication_name.trim()) { setError("Enter the medication name."); return; }
     if (draft.quantity_on_hand === "" || Number(draft.quantity_on_hand) < 0) { setError("Enter how many you have on hand (0 or more)."); return; }
-    const body: Record<string, unknown> = {
+    const body: NewMedication = {
       medication_name: draft.medication_name.trim(), medication_type: draft.medication_type, dosage_form: draft.dosage_form,
       dose_amount: Number(draft.dose_amount), dose_unit: draft.dose_unit.trim() || draft.dosage_form,
       frequency: draft.frequency, quantity_on_hand: Number(draft.quantity_on_hand), start_date: draft.start_date,
@@ -146,7 +141,7 @@ function Medications() {
         }).catch(() => ({ warnings: [] as SafetyWarning[] }));
         if (check.warnings.length) { setCheckWarnings(check.warnings); return; }
       }
-      await api("/medications", { method: "POST", body: JSON.stringify(body) });
+      await saveMedication(body);
       if (fromRecords) {
         navigate("/medical-records", { state: { addedMedication: body.medication_name } });
         return;
@@ -161,11 +156,9 @@ function Medications() {
   });
 
   const logDose = (m: Med, status: "taken" | "skipped") => act(async () => {
-    const r = await api<{ inventory_warning?: string; medication: Med }>(`/medications/${m.medication_id}/doses`, {
-      method: "POST", body: JSON.stringify({ dose_status: status }),
-    });
+    const r = await saveDose(m, status);
     if (historyFor === m.medication_id) await openHistory(m.medication_id, true);
-    if (r.inventory_warning) return r.inventory_warning;
+    if (r.inventoryWarning) return r.inventoryWarning;
     return status === "taken"
       ? `Logged a dose of ${m.medication_name}. ${plural(r.medication.quantity_on_hand, m.dose_unit)} left.`
       : `Marked a skipped dose of ${m.medication_name}.`;
@@ -176,33 +169,30 @@ function Medications() {
     const qty = Number(refillQty);
     if (!(qty > 0)) { setError("Enter how many you picked up."); return; }
     act(async () => {
-      const r = await api<{ refill_warning?: string; medication: Med }>(`/medications/${m.medication_id}/refills`, {
-        method: "POST", body: JSON.stringify({ quantity_added: qty }),
-      });
+      const r = await saveRefill(m, qty);
       setRefillFor(null); setRefillQty("");
       if (historyFor === m.medication_id) await openHistory(m.medication_id, true);
       return `Added ${plural(String(qty), m.dose_unit)}. Now ${plural(r.medication.quantity_on_hand, m.dose_unit)} on hand.`
-        + (r.refill_warning ? ` ${r.refill_warning}` : "");
+        + (r.refillWarning ? ` ${r.refillWarning}` : "");
     });
   }
 
   const setStatus = (m: Med, status: Med["status"]) => act(async () => {
-    await api(`/medications/${m.medication_id}`, { method: "PUT", body: JSON.stringify({ status }) });
+    await updateMedication(m.medication_id, { status });
     return `${m.medication_name} is now ${status}.`;
   });
 
   const remove = (m: Med) => {
     if (!window.confirm(`Delete ${m.medication_name} and its dose history?`)) return;
     act(async () => {
-      await api(`/medications/${m.medication_id}`, { method: "DELETE" });
+      await deleteMedication(m.medication_id);
       return `${m.medication_name} deleted.`;
     });
   };
 
-  async function openHistory(id: number, keepOpen = false) {
+  async function openHistory(id: string, keepOpen = false) {
     if (historyFor === id && !keepOpen) { setHistoryFor(null); return; }
-    const r = await api<{ recent_doses: Dose[]; refills: Refill[] }>(`/medications/${id}`);
-    setHistory({ doses: r.recent_doses, refills: r.refills });
+    setHistory(await getHistory(id));
     setHistoryFor(id);
   }
 
@@ -350,7 +340,7 @@ function Medications() {
                 <article key={m.medication_id} className={`med-card ${m.low_stock ? "low" : ""} ${!active ? "inactive" : ""}`}>
                   <div className="med-main">
                     <div>
-                      <h3>{m.medication_name}{m.strength && <span className="med-strength"> {n(m.strength)} {m.strength_unit}</span>}</h3>
+                      <h3>{m.medication_name}{m.strength != null && <span className="med-strength"> {n(m.strength)} {m.strength_unit}</span>}</h3>
                       <p>{plural(m.dose_amount, m.dose_unit)} · {freqLabel(m.frequency)}{m.purpose && <> · for {m.purpose}</>}</p>
                       {m.instructions && <p className="shared-sub">{m.instructions}</p>}
                       <span className="med-badge type">{m.medication_type === "non_prescription" ? "Non-prescription" : "Prescription"}</span>

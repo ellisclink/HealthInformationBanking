@@ -1,5 +1,4 @@
-// `idLabel`/`idValue` are optional. The old version always printed "Patient ID:",
-// so the physician card read "Patient ID: Provider ID: DR-2048".
+// `idLabel`/`idValue` are optional; the ID line only shows when a value is given.
 function ProfileCard({ name, role, idLabel, idValue }: { name: string; role: string; idLabel?: string; idValue?: string }) {
   return (
     <section className="profile-card">

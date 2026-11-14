@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { apiUpload } from "../api";
+import { apiUpload, currentName } from "../api";
 
 // Import a C-CDA health record: choose the file, see what it contains, tick what to import.
 //   POST /ccda/preview  -> { patient, sections }            (saves nothing)
@@ -13,6 +13,8 @@ type Outcome = { added: number; skipped: number; failed: number };
 type Done = { message?: string; result: Record<string, Outcome>; problems?: { section: string; label: string; reason: string }[]; original?: string; safety?: { open_count: number; major_open_count: number } | null };
 
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
+const normalizeName = (value: string | null | undefined) =>
+  String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
 // the site's global label/input styles stretch checkboxes across the row; keep these on one line
 const row: React.CSSProperties = { display: "flex", flexDirection: "row", alignItems: "center", gap: 8, margin: "4px 0" };
 const box: React.CSSProperties = { width: "auto", margin: 0, flex: "none" };
@@ -66,6 +68,8 @@ export default function CcdaImport({ onDone }: { onDone?: () => void }) {
     setPicked((p) => ({ ...p, [key]: (p[key] || []).length === s.items.length ? [] : s.items.map((i) => i.index) }));
 
   const total = Object.values(picked).reduce((n, a) => n + a.length, 0);
+  const accountName = currentName();
+  const nameMismatch = !!preview && !!preview.patient.name && !!accountName && normalizeName(preview.patient.name) !== normalizeName(accountName);
 
   async function runImport() {
     if (!file || !total) return;
@@ -79,14 +83,14 @@ export default function CcdaImport({ onDone }: { onDone?: () => void }) {
   }
 
   return (
-    <section aria-labelledby="ccda-title">
-      <div className="med-toolbar">
+    <section aria-labelledby="ccda-title" className="ccda-shell">
+      <div className="med-toolbar ccda-header">
         <h3 id="ccda-title">Import a health record (C-CDA)</h3>
-        <button className="secondary-button" type="button" onClick={() => { setOpen((o) => !o); reset(); }}>{open ? "Close" : "Import"}</button>
+        <button className="primary-button" type="button" onClick={() => { setOpen((o) => !o); reset(); }}>{open ? "Close" : "Import"}</button>
       </div>
 
       {open && (
-        <div className="med-add">
+        <div className="med-add ccda-import-panel">
           <p className="form-hint">Choose the .xml health record file (CCD/C-CDA) you downloaded from your provider's portal. You will see what it contains before anything is saved.</p>
           {error && <p className="notice error" role="alert">{error}</p>}
 
@@ -118,7 +122,12 @@ export default function CcdaImport({ onDone }: { onDone?: () => void }) {
           {preview && (
             <div>
               <p><strong>{preview.patient.name || "Unnamed patient"}</strong>{preview.patient.birth_date ? ` · born ${preview.patient.birth_date}` : ""}</p>
-              <p className="form-hint">Check that this is your record before importing.</p>
+              {nameMismatch && (
+                <p className="notice error" role="alert">
+                  Warning: this file is for <strong>{preview.patient.name}</strong>, but your account name is <strong>{accountName}</strong>. Please double-check before importing.
+                </p>
+              )}
+              {!nameMismatch && <p className="form-hint">Check that this is your record before importing.</p>}
 
               {Object.entries(preview.sections).filter(([, s]) => s.items.length > 0).map(([key, s]) => (
                 <fieldset key={key}>

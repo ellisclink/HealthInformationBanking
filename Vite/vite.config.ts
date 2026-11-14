@@ -6,9 +6,6 @@ import { nodePolyfills } from 'vite-plugin-node-polyfills';
 export default defineConfig({
   // npm run dev: send Parse calls to the local Parse Server (Parse/local, port 1337)
   server: { proxy: { '/parse': 'http://127.0.0.1:1337' } },
-  // npm start (Back4app Web Deployment): serves the built site from dist/. allowedHosts: true lets it answer on the
-  // b4a.run address and any custom domain; unknown paths like /emergency-access fall back to index.html.
-  preview: { allowedHosts: true },
   plugins: [
     react(),
     nodePolyfills({

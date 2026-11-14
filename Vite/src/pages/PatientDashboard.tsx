@@ -4,9 +4,42 @@ import NavigationBar from "../components/NavigationBar";
 import ProfileCard from "../components/ProfileCard";
 import ShareButton from "../components/ShareButton";
 import { Link, useNavigate } from 'react-router-dom';
-import { currentName } from "../api";
+import { api, currentName } from "../api";
+import { listMedications } from "../data/medications";
+import { normalizeHealthHistory } from "../healthHistory";
+import { useEffect, useState } from "react";
+
+type Counts = { medications: number; allergies: number; immunizations: number; procedures: number };
+
+// Real counts for the 4 cards: active medications from the tracker (Parse SDK, data/medications.ts),
+// and the filled lines of the Health History form (GET /records). "Filled" is the same rule the
+// Medical Records list uses, so the numbers match what that page shows.
+async function loadCounts(): Promise<Counts> {
+  const [meds, rec] = await Promise.all([
+    listMedications(),
+    api<{ data: unknown; updated_at: string | null }>("/records"),
+  ]);
+  const h = normalizeHealthHistory(rec.data);
+  return {
+    medications: meds.filter((m) => m.status === "active").length,
+    allergies: h.allergies.filter((a) => a.allergen.trim()).length,
+    immunizations: h.immunizations.filter((v) => v.vaccine.trim()).length,
+    procedures: h.surgeries.filter((s) => s.type.trim()).length,
+  };
+}
 
 function PatientDashboard() {
+  const [counts, setCounts] = useState<Counts | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    loadCounts()
+      .then((c) => { if (!cancelled) { setCounts(c); setError(""); } })
+      .catch((e) => { if (!cancelled) setError(`Could not load your record counts: ${(e as Error).message}`); });
+    return () => { cancelled = true; };
+  }, []);
+
   const navigate = useNavigate();
 
   // Used to pop up "Opening the Share Records page." and then not open it.
@@ -20,7 +53,7 @@ function PatientDashboard() {
 
       <main className="page-container">
         <AlertBanner
-          message="Your medical information is protected. Only share records with authorized healthcare providers."
+          message="Your medical information is protected. Only share your records with people you trust."
           type="info"
         />
 
@@ -42,6 +75,8 @@ function PatientDashboard() {
           role="Patient"
         />
 
+        {error && <p className="notice error" role="alert">{error}</p>}
+
         <section className="record-grid">
           <Link className="feature-card dashboard-link" to="/health-diary"><h3>Health Diary</h3><p>Record and review your health notes.</p></Link>
           <Link className="feature-card dashboard-link" to="/vital-signs"><h3>Vital Signs</h3><p>Log readings and explore trends.</p></Link>
@@ -54,25 +89,25 @@ function PatientDashboard() {
           <Link className="feature-card dashboard-link" to="/disposal"><h3>Safe Disposal</h3><p>Learn how to safely get rid of leftover medicine.</p></Link>
           <MedicalRecordCard
             title="Medications"
-            count={3}
+            count={counts?.medications ?? null}
             description="View current and previous medications."
           />
 
           <MedicalRecordCard
             title="Allergies"
-            count={2}
+            count={counts?.allergies ?? null}
             description="Review documented allergies and reactions."
           />
 
           <MedicalRecordCard
             title="Immunizations"
-            count={6}
+            count={counts?.immunizations ?? null}
             description="View vaccination history and dates."
           />
 
           <MedicalRecordCard
             title="Procedures"
-            count={1}
+            count={counts?.procedures ?? null}
             description="Review previous medical procedures."
           />
         </section>

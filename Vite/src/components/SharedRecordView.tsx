@@ -2,8 +2,8 @@ import type { SharedView } from "../api";
 import HealthHistoryView from "./HealthHistoryView";
 import { isHealthHistory } from "../healthHistory";
 
-// Read-only display of whatever sections a share code allows. Used by the physician
-// dashboard and the family/friends viewer. There are no edit controls here on purpose:
+// Read-only display of whatever sections a share code allows. Used by the
+// shared-record viewer (the /view page). There are no edit controls here on purpose:
 // shared records can be read, never changed, by anyone but the patient.
 const pretty = (s: string) => s.replaceAll("_", " ");
 const num = (v: string | null) => (v == null ? "" : String(Number(v)));

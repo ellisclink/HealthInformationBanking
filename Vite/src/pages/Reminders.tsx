@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
 import NavigationBar from "../components/NavigationBar";
 import { api } from "../api";
+import { listMedications } from "../data/medications";
 
 // Reminders: repeating or one-time reminders (medicine, refill, appointment, device part, custom)
 // and the switches for the automatic alerts.
 //   GET/POST /reminders, PUT/DELETE /reminders/:id
 //   GET/PUT /notifications/settings
 // Snooze is on the notification bell, not on this page.
-// Linked items: GET /medications, GET /respiratory/devices (+ /:id/supplies), GET /calendar/events.
+// Linked items: listMedications() (data/medications.ts), GET /respiratory/devices (+ /:id/supplies), GET /calendar/events.
 
 type ReminderType = "medication" | "refill" | "appointment" | "device_supply" | "custom";
 type Freq = "daily" | "weekly" | "once";
@@ -203,7 +204,7 @@ function Reminders() {
     // the linked-item lists are extras: the page still works without them
     const failed: string[] = [];
     Promise.all([
-      api<{ medications: MedOption[] }>("/medications").then((r) => r.medications || []).catch(() => { failed.push("medicines"); return [] as MedOption[]; }),
+      listMedications().catch(() => { failed.push("medicines"); return [] as MedOption[]; }),
       api<{ events: EventOption[] }>("/calendar/events").then((r) => r.events || []).catch(() => { failed.push("appointments"); return [] as EventOption[]; }),
       api<{ devices: Device[] }>("/respiratory/devices").then((r) => r.devices || []).catch(() => { failed.push("devices"); return [] as Device[]; }),
     ]).then(async ([m, ev, dev]) => {

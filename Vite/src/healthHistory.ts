@@ -3,7 +3,7 @@
 // It's saved as the patient's record (PUT /api/records).
 //
 // Medications are NOT typed into this form any more: the form shows the patient's
-// Medications tracker (GET /api/medications), split into prescription and
+// Medications tracker (listMedications() in data/medications.ts), split into prescription and
 // non-prescription. `prescriptions` / `non_prescriptions` below only hold lines typed
 // into older versions of the form, so they can be shown and moved to the tracker.
 
@@ -146,14 +146,15 @@ export const isHealthHistory = (data: unknown) =>
 // ---- medications from the Medications tracker, shown on the form ----
 export type FormMedication = {
   medication_name: string; medication_type?: "prescription" | "non_prescription" | null;
-  strength: string | null; strength_unit: string | null;
-  dose_amount: string | null; dose_unit: string | null; frequency: string | null;
+  // numbers from the Medications tracker (data/medications.ts); text in older saved records
+  strength: number | string | null; strength_unit: string | null;
+  dose_amount: number | string | null; dose_unit: string | null; frequency: string | null;
 };
 const FREQ: Record<string, string> = {
   once_daily: "once a day", twice_daily: "twice a day", three_times_daily: "3 times a day",
   four_times_daily: "4 times a day", every_other_day: "every other day", weekly: "once a week", as_needed: "as needed",
 };
-const n = (v: string | null) => (v == null || v === "" ? "" : String(Number(v)));
+const n = (v: number | string | null) => (v == null || v === "" ? "" : String(Number(v)));
 // "Metformin 500 mg — 1 tablet, twice a day"
 export function medicationLine(m: FormMedication) {
   const strength = m.strength ? ` ${n(m.strength)}${m.strength_unit ? ` ${m.strength_unit}` : ""}` : "";

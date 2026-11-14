@@ -5,7 +5,7 @@ import { api, type SharedView } from "../api";
 
 // Public page for family and friends. No account needed: enter the code the patient
 // gave you and your name. The patient can see who opened their record and when.
-// Healthcare-provider codes don't open here; those need a physician login.
+// Old doctor ("provider") codes no longer open anywhere; the server says to ask for a new code.
 function ViewShared() {
   const [params] = useSearchParams();
   const [code, setCode] = useState(params.get("code") ?? "");

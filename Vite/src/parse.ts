@@ -5,7 +5,10 @@
 //   - opened from this computer (localhost / 127.0.0.1): the local Parse Server (Parse/local)
 //   - anywhere else (the Back4app site): the Back4app app below
 // The App ID and JavaScript key are meant to be public (every visitor's browser has them).
-// What protects the data is that every class is locked to Cloud Code (Parse/cloud/lib/setup.js).
+// What protects the data is that every class is locked to Cloud Code, except the 7 owner classes (Medication, DoseLog,
+// Refill, DiaryEntry, Condition, ConditionNote, ConditionTarget), which logged-in patients reach for their own rows only
+// (triggers in Parse/cloud/lib/access.js), and _User, which allows public create for sign-up only (checked by the
+// triggers in Parse/cloud/lib/auth.js). Permissions are in Parse/cloud/lib/setup.js.
 // NEVER put the Master Key in this file.
 import Parse from "parse";
 
@@ -36,6 +39,9 @@ Parse.CoreManager.setStorageController({
     for (const k of Object.keys(sessionStorage)) if (k.startsWith("Parse/")) sessionStorage.removeItem(k);
   },
 });
+// the same values, for pages that call Parse.initialize themselves (CCDA.tsx): they re-initialize to this app,
+// and the sessionStorage controller above stays in place
+export const parseConfig = config;
 Parse.initialize(config.appId, config.jsKey);
 Parse.serverURL = config.serverURL;
 

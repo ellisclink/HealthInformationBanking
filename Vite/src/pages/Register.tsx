@@ -1,11 +1,14 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { api } from "../api";
+import Parse from "../parse";
 import PasswordInput from "../components/PasswordInput";
 import { checkPassword } from "../password";
 import { MIN_AGE } from "../legal";
 
 // The password rules are in password.ts (the server enforces the same ones: Parse/cloud/lib/password.js)
+// Sign-up is Parse's own signUp. The server (beforeSave on users, Parse/cloud/lib/auth.js) checks it again, makes every
+// account a patient, records the terms, allows 10 sign-ups an hour per device, and ends the session signUp returns:
+// the new account logs in on the login page with the emailed code.
 
 function Register() {
   const navigate = useNavigate();
@@ -35,7 +38,7 @@ function Register() {
     return "";
   }
 
-  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+  async function handleRegister(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
     const problem = validate();
@@ -46,22 +49,25 @@ function Register() {
 
     setBusy(true);
     setError("");
+    if (Parse.User.current()) {
+      await Parse.User.logOut().catch(() => {});
+    }
     try {
-      await api("/register", {
-        method: "POST",
-        body: JSON.stringify({
-          name: formData.name.trim(),
-          email: formData.email.trim(),
-          password: formData.password,
-          accepted_terms: true,
-        }),
-      });
-      // Send them to the login page with their email filled in
+      const user = new Parse.User();
+      user.set("name", formData.name.trim());
+      user.set("username", formData.email.trim().toLowerCase());
+      user.set("email", formData.email.trim().toLowerCase());
+      user.set("password", formData.password);
+      user.set("accepted_terms", true);
+      await user.signUp();
+      // the server has already ended the session signUp returned; forget it here too
+      await Parse.User.logOut().catch(() => {});
+      // Send them to the login page with their email filled in ("Account created. Log in to continue.")
       navigate("/", {
         state: { registeredEmail: formData.email.trim().toLowerCase() },
       });
-    } catch (err) {
-      setError((err as Error).message);
+    } catch (error) {
+      setError((error as Error).message);
     } finally {
       setBusy(false);
     }
@@ -78,7 +84,7 @@ function Register() {
 
         {error && <p role="alert" className="notice error">{error}</p>}
 
-        <form onSubmit={handleSubmit} noValidate>
+        <form onSubmit={handleRegister} noValidate>
           <div className="form-group">
             <label htmlFor="name">Full Name</label>
             <input

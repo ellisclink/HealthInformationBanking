@@ -1,7 +1,13 @@
-import Parse from './parse';
+import Parse, { parseConfig } from './parse';
+
+// For teammate pages that call Parse.initialize(PARSE_APP_ID, PARSE_JS_KEY) themselves: the same app parse.ts uses,
+// so they never point the site at a different Back4app app.
+export const PARSE_APP_ID = parseConfig.appId;
+export const PARSE_JS_KEY = parseConfig.jsKey;
+export const PARSE_SERVER_URL = parseConfig.serverURL;
 
 export type DiaryEntry = {
-  entry_id: number; entry_date: string; category: string; title: string;
+  entry_id: string; entry_date: string; category: string; title: string;
   description: string | null; severity: number | null; mood: string | null;
   follow_up_needed: boolean;
 };
@@ -20,15 +26,15 @@ export type VitalCard = {
 
 // ---- session (who is logged in) ----
 // The login is a Parse session, kept in sessionStorage (see parse.ts), so it
-// disappears when the tab closes. Name and role come from the logged-in Parse user;
-// only the server can change them (the role can't be picked by the user).
-export type Role = 'patient' | 'physician';
+// disappears when the tab closes. The name comes from the logged-in Parse user.
+// Every account is a patient; Role and currentRole stay so pages can keep asking.
+export type Role = 'patient';
 export type Me = {
-  user_id: string; email: string; name: string; role: Role; npi?: string | null;
+  user_id: string; email: string; name: string; role: Role;
   terms?: { current_version: string; accepted_version: string | null; needs_acceptance: boolean };
 };
 
-// Forget the login in this tab only (the server side is ended by /logout, or has
+// Forget the login in this tab only (the server side is ended by logout(), or has
 // already expired). Parse.User.logOut() would ask the server again and get an error.
 export function clearSession() {
   const done = Parse.CoreManager.getUserController().removeUserFromDisk();
@@ -36,15 +42,16 @@ export function clearSession() {
   return done;
 }
 export async function logout() {
-  // ends the session on the server and writes "logout" to the audit log
-  if (Parse.User.current()) await api('/logout', { method: 'POST' }).catch(() => {});
+  // Parse ends the session on the server; its afterLogout trigger (Parse/cloud/lib/auth.js) writes "logout" to the
+  // audit log and ends the idle-timeout record. An already-ended session just fails, so the error is ignored.
+  if (Parse.User.current()) await Parse.User.logOut().catch(() => {});
   await clearSession();
 }
 export const isLoggedIn = () => !!Parse.User.current();
-export const currentRole = (): Role => (Parse.User.current()?.get('role') === 'physician' ? 'physician' : 'patient');
+export const currentRole = (): Role => 'patient';
 export const currentName = () => String(Parse.User.current()?.get('name') || '');
-export const dashboardPath = (role: Role = currentRole()) =>
-  role === 'physician' ? '/physician-dashboard' : '/patient-dashboard';
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- kept so existing callers can still pass a role
+export const dashboardPath = (_role: Role = currentRole()) => '/patient-dashboard';
 
 // Today's date in the user's time zone as YYYY-MM-DD. (toISOString() gives the
 // UTC date, which is already "tomorrow" after 8pm in Florida.)
@@ -54,10 +61,11 @@ export function localDate(d = new Date()) {
 
 // Every request goes to ONE Cloud Code function ("api" in Parse/cloud/main.js),
 // which checks the session and runs the same routes the old Node server had.
-// The pages still call api('/medications', { method: 'POST', body: JSON.stringify(...) }).
+// The pages still call api('/vitals', { method: 'POST', body: JSON.stringify(...) }).
+// Medications are not here: they use the Parse SDK through data/medications.ts (D-025).
 type Reply = { status: number; error?: string; message?: string; [key: string]: unknown };
 
-function sessionEnded() {
+export function sessionEnded() {
   // sessions end after 30 idle minutes or 12 hours
   clearSession();
   if (window.location.pathname !== '/') window.location.assign('/');
@@ -125,6 +133,7 @@ export async function apiFile(path: string): Promise<Blob> {
 }
 
 // ---- shared records (read-only views opened with a share code) ----
+// every new code is 'family'; 'provider' is only on old codes, which no longer open (the server answers 410)
 export type ShareAudience = 'provider' | 'family';
 export type ShareSection = 'record' | 'medications' | 'vitals' | 'diary';
 export const SHARE_SECTIONS: { key: ShareSection; label: string }[] = [

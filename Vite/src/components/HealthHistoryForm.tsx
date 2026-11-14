@@ -4,10 +4,10 @@ import { api, currentName, type Me } from "../api";
 import {
   ALCOHOL_OPTIONS, CONDITIONS, MARITAL_OPTIONS, RACE_OPTIONS, SEX_OPTIONS, TOBACCO_OPTIONS,
   ageFrom, compactHealthHistory, emptyHealthHistory, isNonPrescription, medicationLine, normalizeHealthHistory,
-  type Allergy, type FormMedication, type HealthHistory, type Immunization, type Medication, type Surgery,
+  type Allergy, type HealthHistory, type Immunization, type Medication, type Surgery,
 } from "../healthHistory";
+import { addMedication as saveMedication, listMedications, type Med } from "../data/medications";
 
-type TrackedMed = FormMedication & { medication_id: number; status: string };
 type MedKind = "prescription" | "non_prescription";
 
 type RecordResponse = {
@@ -24,7 +24,7 @@ function HealthHistoryForm() {
   const navigate = useNavigate();
   const location = useLocation();
   const addedName = (location.state as { addedMedication?: string } | null)?.addedMedication;
-  const [meds, setMeds] = useState<TrackedMed[]>([]);
+  const [meds, setMeds] = useState<Med[]>([]);
   const [form, setForm] = useState<HealthHistory>(() => emptyHealthHistory(currentName()));
   const [meta, setMeta] = useState<{ updated_at: string | null }>({ updated_at: null });
   const [loading, setLoading] = useState(true);
@@ -36,7 +36,7 @@ function HealthHistoryForm() {
   useEffect(() => {
     Promise.all([
       api<RecordResponse>("/records"),
-      api<{ medications: TrackedMed[] }>("/medications"),
+      listMedications(),
       api<Me>("/me").catch(() => null),
     ])
       .then(([r, m, me]) => {
@@ -44,7 +44,7 @@ function HealthHistoryForm() {
         // start with the account email if the form doesn't have one yet
         if (!h.patient.email && me?.email) h.patient.email = me.email;
         setForm(h);
-        setMeds(m.medications.filter((x) => x.status === "active" || x.status === "paused"));
+        setMeds(m.filter((x) => x.status === "active" || x.status === "paused"));
         setMeta({ updated_at: r.updated_at });
       })
       .catch((e) => setError((e as Error).message))
@@ -64,11 +64,11 @@ function HealthHistoryForm() {
     const old = form[key][index];
     setBusy(true); setError(""); setMessage("");
     try {
-      const r = await api<{ medication: TrackedMed }>("/medications", { method: "POST", body: JSON.stringify({
+      const saved = await saveMedication({
         medication_name: old.name.trim(), medication_type: kind, quantity_on_hand: 0,
         ...(old.dose.trim() ? { instructions: old.dose.trim() } : {}),
-      }) });
-      setMeds((list) => [...list, r.medication]);
+      });
+      setMeds((list) => [...list, saved]);
       update((f) => ({ ...f, [key]: f[key].filter((_, i) => i !== index) }));
       setMessage(`${old.name} moved to your Medications. Save the form to finish, then set its pill count on the Medications page.`);
     } catch (e) { setError((e as Error).message); }

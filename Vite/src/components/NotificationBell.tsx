@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
+import { getMedicationById, logDose } from "../data/medications";
 
 type Notice = {
   notification_id: string;
@@ -141,10 +142,7 @@ function NotificationBell() {
     setBusyDose((s) => new Set(s).add(id));
     let saved = false;
     try {
-      await api(`/medications/${encodeURIComponent(medId)}/doses`, {
-        method: "POST",
-        body: JSON.stringify({ dose_status: "taken" }),
-      });
+      await logDose(await getMedicationById(medId), "taken");
       saved = true;
       setDoseLogged((s) => new Set(s).add(id));
       setError("");
@@ -153,7 +151,8 @@ function NotificationBell() {
       setError(
         saved
           ? `Your dose was logged, but the notification could not be marked read: ${errorText(err)}`
-          : errorText(err),
+          // the medication was deleted since the reminder was sent (same text as the old route)
+          : errorText(err) === "Not found" ? "Medication not found" : errorText(err),
       );
     } finally {
       doseBusy.current.delete(id);

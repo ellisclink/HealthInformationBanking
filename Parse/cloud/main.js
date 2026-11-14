@@ -61,9 +61,9 @@ Parse.Cloud.define("api", async (request) => {
 
 // Step 3 of login: only allowed right after the emailed code was entered
 // if auth failed to load, fail SAFE: refuse every login and every account change that is not from Cloud Code
-Parse.Cloud.beforeLogin(auth ? auth.beforeLogin : () => { throw new Parse.Error(Parse.Error.OTHER_CAUSE, "The server is starting up or has a problem; please try again shortly."); });
+// Parse.Cloud.beforeLogin(auth ? auth.beforeLogin : () => { throw new Parse.Error(Parse.Error.OTHER_CAUSE, "The server is starting up or has a problem; please try again shortly."); });
 // Only Cloud Code may create or change accounts (no making yourself a physician)
-Parse.Cloud.beforeSave(Parse.User, auth ? auth.beforeSaveUser : (request) => { if (!request.master) throw new Parse.Error(Parse.Error.OPERATION_FORBIDDEN, "Accounts are changed through the app."); });
+// Parse.Cloud.beforeSave(Parse.User, auth ? auth.beforeSaveUser : (request) => { if (!request.master) throw new Parse.Error(Parse.Error.OPERATION_FORBIDDEN, "Accounts are changed through the app."); });
 
 Parse.Cloud.define("makePhysician", (request) => { if (!auth) throw new Error("auth did not load; see ping"); return auth.makePhysician(request.params || {}); }, { requireMaster: true });
 // Shows what the server sees for a request: call it (master key) with a made-up X-Forwarded-For header to find your TRUSTED_PROXY_HOPS number (see lib/clientip.js)

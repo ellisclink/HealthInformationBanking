@@ -1,6 +1,6 @@
 import { ageFrom, isNonPrescription, medicationLine, normalizeHealthHistory, type FormMedication } from "../healthHistory";
 
-// Read-only version of the Health History form, for doctors and family who open a
+// Read-only version of the Health History form, for the people who open a
 // share code. Only filled-in parts are shown so it reads like a completed form.
 // `medications` = the patient's current medications from the Medications tracker.
 function HealthHistoryView({ data, medications = [] }: { data: unknown; medications?: FormMedication[] }) {

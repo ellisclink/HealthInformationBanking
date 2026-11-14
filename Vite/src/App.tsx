@@ -6,7 +6,6 @@ import Register from "./pages/Register";
 import ViewShared from "./pages/ViewShared";
 import MedicalRecords from "./pages/MedicalRecords";
 import PatientDashboard from "./pages/PatientDashboard";
-import PhysicianDashboard from "./pages/PhysicianDashboard";
 import Settings from "./pages/Settings";
 import ShareRecords from "./pages/ShareRecords";
 import HealthDiary from "./pages/HealthDiary";
@@ -28,6 +27,7 @@ import Terms from "./pages/Terms";
 import Privacy from "./pages/Privacy";
 import Disclaimer from "./pages/Disclaimer";
 import Footer from "./components/Footer";
+import CCDA from "./pages/CCDA"
 
 function App() {
   return (
@@ -54,6 +54,7 @@ function App() {
         <Route path="/my-links" element={<RequireAuth role="patient"><MyLinks /></RequireAuth>} />
         <Route path="/disposal" element={<RequireAuth role="patient"><Disposal /></RequireAuth>} />
         <Route path="/documents" element={<RequireAuth role="patient"><Documents /></RequireAuth>} />
+        <Route path="/ccda" element={<RequireAuth role="patient"><CCDA /></RequireAuth>} />
         <Route path="/respiratory" element={<RequireAuth role="patient"><Respiratory /></RequireAuth>} />
         <Route path="/reminders" element={<RequireAuth role="patient"><Reminders /></RequireAuth>} />
         <Route path="/nutrition" element={<RequireAuth role="patient"><Nutrition /></RequireAuth>} />
@@ -62,9 +63,6 @@ function App() {
 
         <Route path="/emergency" element={<RequireAuth role="patient"><Emergency /></RequireAuth>} />
         <Route path="/pre-visit" element={<RequireAuth role="patient"><PreVisit /></RequireAuth>} />
-
-        {/* physicians only */}
-        <Route path="/physician-dashboard" element={<RequireAuth role="physician"><PhysicianDashboard /></RequireAuth>} />
 
         {/* any logged-in user */}
         <Route path="/medical-records" element={<RequireAuth><MedicalRecords /></RequireAuth>} />

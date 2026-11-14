@@ -2,15 +2,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import NavigationBar from "../components/NavigationBar";
 import { api, localDate } from "../api";
 import type { VitalType } from "../api";
+import {
+  listConditions, getConditionDetail, addCondition, updateCondition, deleteCondition, addNote as saveNote, setTarget, setByText,
+  type Condition, type Note, type Target, type Summary, type ConditionInput, type TargetInput,
+} from "../data/conditions";
 
 // Conditions: the patient's health conditions, with notes and vital-sign targets for each.
-//   GET  /conditions                 -> { conditions }
-//   GET  /conditions/summary         -> counts and the active conditions
-//   POST /conditions, PUT/DELETE /conditions/:id
-//   GET  /conditions/:id             -> { condition, notes, targets } (used when a condition is opened)
-//   POST /conditions/:id/notes       -> { note_date, note_type, note_text }
-//   POST /conditions/:id/targets     -> { vital_type, target_min, target_max, secondary_min, secondary_max }
-//   GET  /vitals/types               -> the vital types a target can be set for
+// Condition, ConditionNote and ConditionTarget are read and saved with the Parse SDK (data/conditions.ts); the summary
+// (counts, active conditions with their own note count and last note date) is worked out on the page from that list.
+//   GET  /vitals/types               -> the vital types a target can be set for (reference data, still a server route)
 // Everything from the server is shown as plain text.
 
 const CATEGORIES = ["chronic", "acute", "allergy", "mental_health", "injury", "surgical", "other"] as const;
@@ -18,27 +18,6 @@ const STATUSES = ["active", "managed", "in_remission", "resolved", "inactive"] a
 const SEVERITIES = ["mild", "moderate", "severe"] as const;
 const NOTE_TYPES = ["general", "symptom_change", "treatment_change", "provider_visit", "flare_up", "improvement"] as const;
 
-type Condition = {
-  condition_id: string | number; condition_name: string; icd10_code: string | null; category: string | null;
-  status: string; severity: string | null; onset_date: string | null; diagnosed_date: string | null;
-  resolved_date: string | null; diagnosing_provider: string | null; managing_provider: string | null;
-  provider_facility: string | null; is_primary: boolean; source: string | null; notes: string | null;
-};
-type Note = { note_id: string | number; note_date: string; note_type: string; note_text: string };
-type Target = {
-  target_id: string | number; vital_type: string; target_min: number | string | null; target_max: number | string | null;
-  secondary_min: number | string | null; secondary_max: number | string | null; set_by: string | null; active: boolean;
-};
-type Summary = {
-  total_conditions: number; active_count: number;
-  by_status: { status: string; count: number }[];
-  by_category: { category: string; count: number }[];
-  active_conditions: {
-    condition_id: string | number; condition_name: string; icd10_code: string | null; category: string | null;
-    status: string; severity: string | null; onset_date: string | null; managing_provider: string | null;
-    is_primary: boolean; note_count: number; last_note_date: string | null;
-  }[];
-};
 type Detail = { notes: Note[]; targets: Target[] };
 
 type FormState = {
@@ -51,7 +30,7 @@ type TargetForm = { vital_type: string; min: string; max: string; secMin: string
 const label = (s: string | null | undefined) => (s ? s.charAt(0).toUpperCase() + s.slice(1).replace(/_/g, " ") : "");
 const day = (s: string | null | undefined) => (s ? String(s).slice(0, 10) : "");
 const fmtDate = (s: string | null | undefined) => (s ? new Date(`${day(s)}T00:00:00`).toLocaleDateString([], { dateStyle: "medium" }) : "");
-const idOf = (v: string | number) => String(v);
+const idOf = (v: string) => v;
 
 const emptyForm = (): FormState => ({
   name: "", icd10: "", category: "", status: "active", severity: "",
@@ -77,7 +56,6 @@ function range(lo: unknown, hi: unknown) {
 function Conditions() {
   const [conditions, setConditions] = useState<Condition[]>([]);
   const [summary, setSummary] = useState<Summary | null>(null);
-  const [summaryError, setSummaryError] = useState("");
   const [vitalTypes, setVitalTypes] = useState<VitalType[]>([]);
   const [typesError, setTypesError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -101,40 +79,29 @@ function Conditions() {
   const [targetError, setTargetError] = useState("");
   const openRef = useRef<string | null>(null);   // ignore an older answer when another condition was opened meanwhile
 
-  const loadConditions = useCallback(async () => {
-    const r = await api<{ conditions: Condition[] }>("/conditions");
-    setConditions(r.conditions);
-  }, []);
-
-  const loadSummary = useCallback(async () => {
-    try {
-      const r = await api<Summary>("/conditions/summary");
-      setSummary(r); setSummaryError("");
-    } catch (e) { setSummary(null); setSummaryError((e as Error).message); }
-  }, []);
-
   const loadDetail = useCallback(async (id: string) => {
-    const r = await api<{ notes: Note[]; targets: Target[] }>(`/conditions/${encodeURIComponent(id)}`);
+    const r = await getConditionDetail(id);
     if (openRef.current !== id) return;
-    setDetail({ notes: r.notes ?? [], targets: r.targets ?? [] });
+    setDetail(r);
   }, []);
+
+  // Will's queryConditions: the Parse queries and the summary now live in data/conditions.ts (listConditions)
+  async function queryConditions() {
+    const { conditions: list, summary: counts } = await listConditions();
+    setConditions(list);
+    setSummary(counts);
+  }
 
   useEffect(() => {
-    // state is set from a timer callback, not in the effect body itself
-    const timer = window.setTimeout(() => {
-      // the vital types and the summary are extras: the list still works without them
-      Promise.all([
-        loadConditions(),
-        loadSummary(),
-        api<{ types: VitalType[] }>("/vitals/types")
-          .then((t) => setVitalTypes(t.types))
-          .catch((e: Error) => setTypesError(e.message)),
-      ])
-        .catch((e) => setError((e as Error).message))
-        .finally(() => setLoading(false));
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, [loadConditions, loadSummary]);
+    // the vital types are an extra: the list still works without them
+    api<{ types: VitalType[] }>("/vitals/types")
+      .then((t) => setVitalTypes(t.types))
+      .catch((e: Error) => setTypesError(e.message));
+    listConditions()
+      .then(({ conditions: list, summary: counts }) => { setConditions(list); setSummary(counts); })
+      .catch((e: Error) => setError(e.message))
+      .finally(() => setLoading(false));
+  }, []);
 
   const set = (k: keyof FormState) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
     setForm((f) => ({ ...f, [k]: e.target.value }));
@@ -155,7 +122,7 @@ function Conditions() {
 
   // after a change: reload what is on the page. A failed reload must not look like a failed save.
   async function refreshAfter(done: string) {
-    const tasks: Promise<unknown>[] = [loadConditions(), loadSummary()];
+    const tasks: Promise<unknown>[] = [queryConditions()];
     if (openRef.current) tasks.push(loadDetail(openRef.current));
     try { await Promise.all(tasks); }
     catch (e) { setRefreshError(`${done}, but the page could not refresh: ${(e as Error).message}`); }
@@ -171,7 +138,7 @@ function Conditions() {
       if (d && d > today) { setFormError(`The ${what} date can't be in the future.`); return; }
     }
     const orNull = (v: string) => v.trim() || null;
-    const body = {
+    const body: ConditionInput = {
       condition_name: form.name.trim(), icd10_code: orNull(form.icd10), category: form.category || null,
       status: form.status, severity: form.severity || null,
       onset_date: form.onset || null, diagnosed_date: form.diagnosed || null,
@@ -182,12 +149,10 @@ function Conditions() {
     setBusy(true);
     const wasEdit = editingId !== null;
     try {
-      const r = await api<{ message?: string }>(
-        wasEdit ? `/conditions/${encodeURIComponent(editingId)}` : "/conditions",
-        { method: wasEdit ? "PUT" : "POST", body: JSON.stringify(body) },
-      );
+      if (wasEdit) await updateCondition(editingId, body);
+      else await addCondition(body);
       closeForm(); setForm(emptyForm());
-      setMessage(r.message || (wasEdit ? "Condition updated" : "Condition added"));
+      setMessage(wasEdit ? "Condition updated" : "Condition added");
     } catch (e) { setFormError((e as Error).message); setBusy(false); return; }
     await refreshAfter("Saved");
     setBusy(false);
@@ -198,8 +163,8 @@ function Conditions() {
     setBusy(true); setError(""); setMessage(""); setRefreshError("");
     const id = idOf(c.condition_id);
     try {
-      const r = await api<{ message?: string }>(`/conditions/${encodeURIComponent(id)}`, { method: "DELETE" });
-      setMessage(r.message || "Condition deleted");
+      await deleteCondition(id);
+      setMessage("Condition deleted");
       if (editingId === id) closeForm();
       if (openRef.current === id) { openRef.current = null; setOpenId(null); setDetail(null); }
     } catch (e) { setError((e as Error).message); setBusy(false); return; }
@@ -227,12 +192,9 @@ function Conditions() {
     if (noteForm.date && noteForm.date > localDate()) { setNoteError("The note's date can't be in the future."); return; }
     setBusy(true);
     try {
-      const r = await api<{ message?: string }>(`/conditions/${encodeURIComponent(openId)}/notes`, {
-        method: "POST",
-        body: JSON.stringify({ note_date: noteForm.date || localDate(), note_type: noteForm.type, note_text: noteForm.text.trim() }),
-      });
+      await saveNote(openId, { note_date: noteForm.date || localDate(), note_type: noteForm.type, note_text: noteForm.text.trim() });
       setNoteForm({ date: localDate(), type: "general", text: "" });
-      setMessage(r.message || "Note added");
+      setMessage("Note added");
     } catch (e) { setNoteError((e as Error).message); setBusy(false); return; }
     await refreshAfter("Saved");
     setBusy(false);
@@ -259,13 +221,13 @@ function Conditions() {
     if (min === null && max === null && sMin === null && sMax === null) { setTargetError("Enter at least one limit."); return; }
     if (min !== null && max !== null && min > max) { setTargetError("The lowest value can't be higher than the highest value."); return; }
     if (sMin !== null && sMax !== null && sMin > sMax) { setTargetError("The second lowest value can't be higher than the second highest value."); return; }
-    const body: Record<string, unknown> = { vital_type: targetForm.vital_type, target_min: min, target_max: max };
+    const body: TargetInput = { vital_type: targetForm.vital_type, target_min: min, target_max: max };
     if (dual) { body.secondary_min = sMin; body.secondary_max = sMax; }
     setBusy(true);
     try {
-      const r = await api<{ message?: string }>(`/conditions/${encodeURIComponent(openId)}/targets`, { method: "POST", body: JSON.stringify(body) });
+      await setTarget(openId, body);
       setTargetForm(emptyTarget());
-      setMessage(r.message || "Target set");
+      setMessage("Target set");
     } catch (e) { setTargetError((e as Error).message); setBusy(false); return; }
     await refreshAfter("Saved");
     setBusy(false);
@@ -298,7 +260,6 @@ function Conditions() {
 
         <section aria-labelledby="cond-summary">
           <h3 id="cond-summary">Summary</h3>
-          {summaryError && <p className="notice error" role="alert">{summaryError}</p>}
           {loading ? <p role="status">Loading…</p> : summary && (
             <>
               <p>
@@ -487,7 +448,7 @@ function Conditions() {
                                       <tr key={idOf(t.target_id)}>
                                         <td>{typeName(t.vital_type)}</td>
                                         <td>{targetText(t)}</td>
-                                        <td>{label(t.set_by) || "Not recorded"}</td>
+                                        <td>{setByText(t.set_by)}</td>
                                         <td>{t.active ? "Active" : "Replaced"}</td>
                                       </tr>
                                     ))}

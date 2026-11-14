@@ -1,34 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import AlertBanner from "../components/AlertBanner";
 import NavigationBar from "../components/NavigationBar";
-import { api, localDate, type DiaryEntry, type DiaryInput } from "../api";
+import { localDate, type DiaryInput } from "../api";
+import { listDiary, addDiary, updateDiary, deleteDiary, categories, type DiaryForm, type DisplayEntry } from "../data/diary";
 
-type DiaryForm = {
-  entryDate: string; category: string; title: string; description: string;
-  severity: string; mood: string; followUpNeeded: boolean;
-};
-type DisplayEntry = DiaryForm & { id: number };
-
-const categories: Record<string, string> = {
-  Symptoms: "symptom", Medication: "medication", General: "general"
-};
-const labels: Record<string, string> = Object.fromEntries(
-  Object.entries(categories).map(([label, value]) => [value, label])
-);
 // localDate(), not toISOString(): the ISO string is the UTC date, so after 8pm in
 // Florida new entries defaulted to tomorrow.
 const emptyForm: DiaryForm = {
   entryDate: localDate(), category: "General",
   title: "", description: "", severity: "", mood: "", followUpNeeded: false
 };
-function toDisplay(entry: DiaryEntry): DisplayEntry {
-  return {
-    id: entry.entry_id, entryDate: entry.entry_date.slice(0, 10),
-    category: labels[entry.category] || "General", title: entry.title,
-    description: entry.description || "", severity: entry.severity == null ? "" : String(entry.severity),
-    mood: entry.mood || "", followUpNeeded: entry.follow_up_needed
-  };
-}
 function toPayload(form: DiaryForm): DiaryInput {
   return {
     entry_date: form.entryDate, category: categories[form.category] || "general",
@@ -44,32 +25,37 @@ function formatDate(date: string) {
 function HealthDiary() {
   const [entries, setEntries] = useState<DisplayEntry[]>([]);
   const [formData, setFormData] = useState<DiaryForm>(emptyForm);
-  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("All");
   const [formError, setFormError] = useState("");
+  const [listError, setListError] = useState("");
   const [statusMessage, setStatusMessage] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
 
+  // Will's queryDiary: the Parse query now lives in data/diary.ts (listDiary)
+  const queryDiary = () => listDiary();
+
   async function refresh() {
-    const result = await api<{ entries: DiaryEntry[] }>("/diary-entries");
-    setEntries(result.entries.map(toDisplay));
+    setEntries(await queryDiary());
+    setListError("");
   }
   useEffect(() => {
-    api<{ entries: DiaryEntry[] }>("/diary-entries")
-      .then(result => setEntries(result.entries.map(toDisplay)))
-      .catch(error => setFormError(error.message))
+    queryDiary()
+      .then((list) => { setEntries(list); setListError(""); })
+      .catch((error) => setListError((error as Error).message))
       .finally(() => setLoading(false));
   }, []);
 
   const filteredEntries = useMemo(() => {
     const normalizedSearch = searchTerm.trim().toLowerCase();
-    return [...entries].filter(entry =>
+    // entries come newest first (listDiary); the filter keeps that order
+    return entries.filter(entry =>
       (categoryFilter === "All" || entry.category === categoryFilter) &&
       (!normalizedSearch || entry.title.toLowerCase().includes(normalizedSearch) ||
         entry.description.toLowerCase().includes(normalizedSearch))
-    ).sort((a, b) => b.entryDate.localeCompare(a.entryDate));
+    );
   }, [entries, searchTerm, categoryFilter]);
 
   function handleChange(event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) {
@@ -87,9 +73,8 @@ function HealthDiary() {
     }
     setBusy(true); setFormError(""); setStatusMessage("");
     try {
-      await api(`/diary-entries${editingId != null ? `/${editingId}` : ""}`, {
-        method: editingId != null ? "PUT" : "POST", body: JSON.stringify(toPayload(formData))
-      });
+      if (editingId != null) await updateDiary(editingId, toPayload(formData));
+      else await addDiary(toPayload(formData));
       await refresh();
       setStatusMessage(editingId != null ? "Diary entry updated successfully." : "Diary entry saved successfully.");
       resetForm();
@@ -108,7 +93,7 @@ function HealthDiary() {
     if (!window.confirm(`Delete “${entry.title}”?`)) return;
     setBusy(true); setFormError(""); setStatusMessage("");
     try {
-      await api(`/diary-entries/${entry.id}`, { method: "DELETE" });
+      await deleteDiary(entry.id);
       await refresh();
       if (editingId === entry.id) resetForm();
       setStatusMessage("Diary entry deleted.");
@@ -139,7 +124,7 @@ function HealthDiary() {
           <form className="diary-form-card" onSubmit={handleSubmit}>
             <div className="section-title-row">
               <div>
-                <h3>{editingId ? "Edit Diary Entry" : "New Diary Entry"}</h3>
+                <h3>{editingId != null ? "Edit Diary Entry" : "New Diary Entry"}</h3>
                 <p>Fields marked with * are required.</p>
               </div>
             </div>
@@ -253,9 +238,9 @@ function HealthDiary() {
 
             <div className="form-actions">
               <button className="primary-button" type="submit" disabled={busy}>
-                {busy ? "Saving…" : editingId ? "Save Changes" : "Save Entry"}
+                {busy ? "Saving…" : editingId != null ? "Save Changes" : "Save Entry"}
               </button>
-              {editingId && (
+              {editingId != null && (
                 <button className="secondary-button" type="button" onClick={resetForm}>
                   Cancel
                 </button>
@@ -297,6 +282,8 @@ function HealthDiary() {
                 </select>
               </div>
             </div>
+
+            {listError && <p className="form-error" role="alert">{listError}</p>}
 
             <p className="status-message" role="status" aria-live="polite">{loading ? "Loading diary entries…" : statusMessage}</p>
 

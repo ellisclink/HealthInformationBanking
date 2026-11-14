@@ -62,10 +62,7 @@ function Settings() {
             <input id="settings-email" type="email" value={me?.email ?? ""} readOnly />
           </div>
 
-          <p>Account type: <strong>{me ? (me.role === "physician" ? "Physician" : "Patient") : ""}</strong></p>
-          {me?.role === "physician" && (
-            <p>NPI on file: <strong>{me.npi || "None"}</strong></p>
-          )}
+          <p>Account type: <strong>{me ? "Patient" : ""}</strong></p>
         </section>
 
         <section className="settings-card">
