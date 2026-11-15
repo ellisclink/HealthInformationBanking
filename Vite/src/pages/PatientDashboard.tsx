@@ -88,8 +88,12 @@ function PatientDashboard() {
           <Link className="feature-card dashboard-link" to="/reminders"><h3>Reminders</h3><p>Set reminders for doses and appointments.</p></Link>
           <Link className="feature-card dashboard-link" to="/respiratory"><h3>Breathing Devices</h3><p>Track your breathing devices and how you use them.</p></Link>
           <Link className="feature-card dashboard-link" to="/disposal"><h3>Safe Disposal</h3><p>Learn how to safely get rid of leftover medicine.</p></Link>
-          <Link className="feature-card dashboard-link" to="/MedicalRecords"><h3>Medical Records</h3><p>View personal Medical Record.</p></Link>
-
+          
+          <MedicalRecordCard
+            title="Medication History"
+            count={counts?.medications ?? null}
+            description="Current and past medications on your health record."
+          />
           <MedicalRecordCard
             title="Allergies"
             count={counts?.allergies ?? null}
