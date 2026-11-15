@@ -107,7 +107,7 @@ async function exportData(body, user, ctx) {
   return {
     status: 200, format: EXPORT_FORMAT, exported_at: new Date().toISOString(),
     file_name: `mib-export-${new Date().toISOString().slice(0, 10)}.json`,
-    account: { email: user.user_email, name: user.user_name, role: user.role, ...(user.role === "physician" ? { npi: user.npi } : {}) },
+    account: { email: user.user_email, name: user.user_name, role: user.role },
     counts, data, ...(includeFiles ? { files, files_skipped: filesSkipped } : { files_included: false }),
     note: includeFiles ? undefined : "Uploaded files (PDFs, images) are not in this export. Ask for include_files to add them.",
   };
@@ -170,7 +170,7 @@ async function purgeUser(userId) {
     await destroyAll(await findAll(className, { user_id: userId }));
   }
   await destroyAll(await findAll("AccessLog", { patient_user_id: userId }));
-  // a physician's name stays on the patients' logs (the patient is entitled to know who looked) but is cut loose from the account
+  // a logged-in viewer's name stays on the patients' logs (the patient is entitled to know who looked) but is cut loose from the account
   for (const l of await findAll("AccessLog", { viewer_user_id: userId })) { l.unset("viewer_user_id"); await l.save(null, M); }
   await create("AuditLog", { event: "account_deleted", detail: { user_hash: sha(userId) } });
   try {

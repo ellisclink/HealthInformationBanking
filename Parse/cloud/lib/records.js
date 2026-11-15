@@ -4,16 +4,25 @@
 // Everything a share code shows is READ-ONLY: shared views are read-only, and only the
 // patient can write to their own record.
 //
-// Two kinds of code, picked by the patient:
-//   provider  opens only for a logged-in physician account (read-only)
-//   family    opens for anyone with the code (no account needed), but the viewer must give
-//             their name (read-only)
+// A code opens for anyone who has it (no account needed), but the viewer must give their name (read-only).
 // Every open is written to AccessLog, which the patient can see.
+// Legacy: codes used to be "provider" (opened only by a physician account) or "family". Physician accounts are gone
+// (2026-11-06), so new codes are always "family", and an old "provider" code is refused with 410 (OLD_PROVIDER_CODE).
 
-const { M, findAll, findOne, create, save, audit, toRow } = require("./db");
+//
+// The Health History form itself (MedicalRecord.data) is read and saved by the website with the Parse SDK
+// (Vite/src/data/records.ts), guarded by RULES.MedicalRecord in access.js with the rules below (recordProblem /
+// recordValues = the old PUT /records checks): one row per user (a second create is refused, parallel creates are
+// removed again after the save, the oldest is kept), only `data` may be sent (user_id, the legacy verified_* fields and
+// everything else are refused), and after every browser save recordAfterSave copies the form's allergies to the
+// Allergy list (safety.syncAllergiesFromRecord, master key), which the old route's hook did. getRecord / putRecord stay
+// for the server's own callers (the PDF auto-fill and the C-CDA import, which pass the same hook).
+
+const { M, findAll, findOne, oldestRow, keepOldest, create, save, audit, toRow } = require("./db");
 const sec = require("./security");
+const safety = require("./safety");   // syncAllergiesFromRecord (safety.js does not load this file)
 
-const SHARE_AUDIENCES = ["provider", "family"];
+const SHARE_AUDIENCES = ["family"];
 const SHARE_SECTIONS = ["record", "medications", "vitals", "diary"];
 const SHARE_TTL_HOURS_DEFAULT = 24;
 const SHARE_TTL_HOURS_MAX = 24 * 7;
@@ -22,29 +31,87 @@ const LOOKUP_LIMIT = 20;                 // failed code lookups per device per 1
 const MIN15 = 15 * 60 * 1000;
 const TOO_MANY = { status: 429, error: "too many invalid codes from this device — try again in 15 minutes" };
 const BAD_CODE = { status: 404, error: "invalid, expired, or revoked code" };
+const OLD_PROVIDER_CODE = { status: 410, error: "This code no longer works. Ask the patient for a new sharing code." };
 
 const iso = (d) => (d instanceof Date ? d.toISOString() : d ?? null);
 
+const RECORD_MAX = 500000;   // characters of JSON.stringify(data)
+const DATA_REQUIRED = "data object required";
+const TOO_LARGE = "record is too large";
+const RECORD_EXISTS = "Your health history is already saved";
+const NOT_REMOVABLE = "Your health history can't be removed. Clear the form and save it instead.";
+
+// the user's record (the oldest row, the one a second create would duplicate); made empty when there is none. After
+// that create the extra rows are removed again (keepOldest), so a browser save or a second server call at the same
+// moment cannot leave a lasting second row; the kept (oldest) row is returned.
 async function getRecordObject(userId) {
-  let rec = await findOne("MedicalRecord", { user_id: userId });
-  if (!rec) rec = await create("MedicalRecord", { user_id: userId, data: {} });
-  return rec;
+  const rec = await oldestRow("MedicalRecord", userId);
+  if (rec) return rec;
+  await create("MedicalRecord", { user_id: userId, data: {} });
+  return keepOldest("MedicalRecord", userId, { row: recordAuditRow });
 }
 const recordView = (rec) => ({
   data: rec.get("data") || {},
   updated_at: iso(rec.updatedAt),
 });
 
-// GET /records
+// the record (the PDF auto-fill and the C-CDA import; the website reads its row itself)
 async function getRecord(user) {
   return { status: 200, ...recordView(await getRecordObject(user.user_id)) };
 }
 
-// PUT /records {data}
+const dataProblem = (data) => {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) return DATA_REQUIRED;
+  if (JSON.stringify(data).length > RECORD_MAX) return TOO_LARGE;
+  return null;
+};
+
+// ---- browser saves (access.js RULES.MedicalRecord) ----
+const RECORD_BROWSER_FIELDS = ["data"];
+// what the audit rows hold: the form data, as the old route's record_updated rows did
+const recordAuditRow = (o) => o.get("data") || {};
+async function recordProblem(body, { user, original }) {
+  if (!original || "data" in body) {
+    const problem = dataProblem(body.data);
+    if (problem) return problem;
+  }
+  if (!original && await oldestRow("MedicalRecord", user.id)) return RECORD_EXISTS;
+  return null;
+}
+const recordValues = (body) => ("data" in body ? { data: body.data } : {});
+// an edit of the form keeps the old audit event name
+const recordAuditEvent = () => "record_updated";
+const recordDeleteProblem = () => NOT_REMOVABLE;
+// The allergy copy, one at a time per user (in this process), always from the record as it is stored when the copy
+// runs: two saves at the same moment (two tabs, or parallel creates where one is removed again) can't interleave their
+// creates and removals, and the last copy always matches the row that is kept.
+const syncing = new Map();   // userId -> the copy running or queued
+function syncKeptRecord(userId) {
+  const run = (syncing.get(userId) || Promise.resolve()).then(async () => {
+    const kept = await oldestRow("MedicalRecord", userId);
+    await safety.syncAllergiesFromRecord(userId, (kept && kept.get("data")) || {});
+  });
+  const done = run.catch(() => {});
+  syncing.set(userId, done);
+  done.then(() => { if (syncing.get(userId) === done) syncing.delete(userId); });
+  return run;
+}
+// After every browser save (once): a create first removes parallel duplicates (the oldest row is kept; a removed
+// duplicate copies nothing); then the kept row's allergies are copied to the Allergy list.
+async function recordAfterSave(obj, { original, ip }) {
+  const userId = obj.get("user_id");
+  if (!original) {
+    const kept = await keepOldest("MedicalRecord", userId, { ip, row: recordAuditRow });
+    if (kept && kept.id !== obj.id) return;
+  }
+  await syncKeptRecord(userId);
+}
+
+// the record save of the server's own callers (the PDF auto-fill and the C-CDA import) {data}
 async function putRecord(body, user, ctx, hooks) {
   const { data } = body;
-  if (typeof data !== "object" || data === null || Array.isArray(data)) return { status: 400, error: "data object required" };
-  if (JSON.stringify(data).length > 500000) return { status: 400, error: "record is too large" };
+  const problem = dataProblem(data);
+  if (problem) return { status: 400, error: problem };
   const rec = await getRecordObject(user.user_id);
   const old = rec.get("data") || {};
   await save(rec, { data });
@@ -67,7 +134,7 @@ async function findLiveShare(code) {
 async function logAccess(ctx, share, action, viewer) {
   await create("AccessLog", {
     patient_user_id: share.get("user_id"), share_code: share.get("share_code"), audience: share.get("audience"),
-    action, viewer_user_id: viewer.user_id || null, viewer_name: viewer.name, viewer_npi: viewer.npi || null,
+    action, viewer_user_id: viewer.user_id || null, viewer_name: viewer.name,
     ip_address: String(ctx.ip || "").slice(0, 64), user_agent: String(ctx.userAgent || "").slice(0, 500),
     sections: share.get("sections"), accessed_at: new Date(),
   });
@@ -129,17 +196,12 @@ async function openShared(code, body, user, ctx, mods) {
     return BAD_CODE;
   }
   await sec.refund(lookupKey(ctx));
-  let viewer;
-  if (share.get("audience") === "provider") {
-    if (!user) return { status: 401, error: "this code is for a healthcare provider — log in with a physician account to open it" };
-    if (user.role !== "physician") return { status: 403, error: "this code is for a healthcare provider; only physician accounts can open it" };
-    viewer = { user_id: user.user_id, name: user.user_name, npi: user.npi };
-  } else {
-    const typed = typeof body.viewerName === "string" ? body.viewerName.trim() : "";
-    if (!typed && !user) return { status: 400, error: "enter your name to view this record" };
-    if (typed.length > 100) return { status: 400, error: "name must be 100 characters or fewer" };
-    viewer = user ? { user_id: user.user_id, name: user.user_name } : { name: typed };
-  }
+  // an old provider code (only physician accounts could open those, and there are none now): refused, nothing logged as opened
+  if (share.get("audience") !== "family") return OLD_PROVIDER_CODE;
+  const typed = typeof body.viewerName === "string" ? body.viewerName.trim() : "";
+  if (!typed && !user) return { status: 400, error: "enter your name to view this record" };
+  if (typed.length > 100) return { status: 400, error: "name must be 100 characters or fewer" };
+  const viewer = user ? { user_id: user.user_id, name: user.user_name } : { name: typed };
   const patient = await new Parse.Query(Parse.User).get(share.get("user_id"), M);
   await logAccess(ctx, share, "view", viewer);
   return {
@@ -161,7 +223,7 @@ async function createShare(body, user, ctx) {
       return { status: 400, error: `expiresHours must be a whole number from 1 to ${SHARE_TTL_HOURS_MAX}` };
     }
   }
-  const audience = body.audience === undefined ? "provider" : body.audience;
+  const audience = body.audience === undefined ? "family" : body.audience;
   if (!SHARE_AUDIENCES.includes(audience)) return { status: 400, error: `audience must be one of: ${SHARE_AUDIENCES.join(", ")}` };
   let sections = SHARE_SECTIONS;
   if (body.sections !== undefined) {
@@ -206,7 +268,8 @@ async function listAccessLog(user) {
     .slice(0, 200)
     .map((l) => ({
       accessed_at: iso(l.get("accessed_at")), action: l.get("action"), audience: l.get("audience"),
-      share_code: l.get("share_code"), viewer_name: l.get("viewer_name"), viewer_npi: l.get("viewer_npi") ?? null,
+      share_code: l.get("share_code"), viewer_name: l.get("viewer_name"),
+      viewer_npi: l.get("viewer_npi") ?? null,   // only on opens of old provider codes
       sections: l.get("sections"), label: labels.get(l.get("share_code")) ?? null,
     }));
   return { status: 200, entries };
@@ -221,4 +284,7 @@ async function revokeShare(code, user, ctx) {
   return { status: 200, ok: true, revoked: share.get("share_code") };
 }
 
-module.exports = { getRecord, putRecord, openShared, createShare, listShares, listAccessLog, revokeShare, toRow };
+module.exports = {
+  getRecord, putRecord, openShared, createShare, listShares, listAccessLog, revokeShare, toRow,
+  RECORD_BROWSER_FIELDS, recordProblem, recordValues, recordAuditEvent, recordDeleteProblem, recordAfterSave, recordAuditRow,
+};

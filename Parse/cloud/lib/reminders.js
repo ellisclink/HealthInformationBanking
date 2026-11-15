@@ -1,4 +1,4 @@
-// reminders.js — Reminder schedules (Task 2.5) and reminder CRUD with snooze (Task 2.6).
+// reminders.js — Reminder schedules (Task 2.5) and the reminder rules (Task 2.6) for the seed and the browser saves.
 // A reminder row carries:
 //   schedule_type  "once" | "daily" | "weekly"
 //   remind_at      Date, once only
@@ -10,7 +10,7 @@
 // Daylight saving: a wall time that does not exist (spring forward) resolves to the instant after the gap,
 // a wall time that happens twice (fall back) uses the earlier instant. No dependency, only Intl.DateTimeFormat.
 
-const { isId, isDate, isDateTime, toRow, findAll, getOwned, save, create, destroy, audit, optText, fail } = require("./db");
+const { isId, isDate, isDateTime, toRow, getOwned, create, audit, optText, fail } = require("./db");
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 // Longest search for the next occurrence: a year of days covers weekly gaps and a far start_date is jumped to directly.
@@ -136,11 +136,10 @@ function nextOccurrence(reminder, after) {
   return null;
 }
 
-// --- CRUD and snooze (Task 2.6) --------------------------------------------------------------
-// Class: Reminder. Routes (wired in router.js, Task 2.8):
-//   list(user)  get(id, user)  create(body, user, ctx)  update(id, body, user, ctx)  remove(id, user, ctx)
-//   snooze(id, minutes, user, ctx)
-// Firing a reminder and turning a fired once reminder off belong to runDue, not to this code.
+// --- the reminder rules (Task 2.6) ------------------------------------------------------------
+// Class: Reminder. prepare() is the rule set of a create or an edit: the seed (create below) and the browser saves
+// (access.js RULES.Reminder) both use it. Firing a reminder and turning a fired once reminder off belong to
+// notifications.runDue, not to this code.
 
 const REMINDER_TYPES = ["medication", "refill", "appointment", "device_supply", "custom"];
 const SCHEDULE_TYPES = ["once", "daily", "weekly"];
@@ -312,27 +311,8 @@ async function prepare(body, current, user, isNew) {
   return { values: out };
 }
 
-async function ownedReminder(id, user) {
-  if (!isId(id)) return { res: fail(400, "Invalid reminder ID") };
-  const reminder = await getOwned("Reminder", id, user.user_id);
-  if (!reminder) return { res: fail(404, "Reminder not found") };
-  return { reminder };
-}
-
-// GET /reminders
-async function list(user) {
-  const rows = await findAll("Reminder", { user_id: user.user_id }, { ascending: "createdAt" });
-  return { status: 200, reminders: rows.map(reminderRow) };
-}
-
-// GET /reminders/:id
-async function get(id, user) {
-  const { reminder, res } = await ownedReminder(id, user);
-  if (res) return res;
-  return { status: 200, reminder: reminderRow(reminder) };
-}
-
-// POST /reminders {reminder_type, title?, linked_id?, schedule_type, times?, days_of_week?, remind_at?, start_date?, end_date?, time_zone?, email_me?}
+// The seed's create (seed.js calls it directly; the website saves Reminder rows with the Parse SDK, below)
+// create(body, user, ctx) {reminder_type, title?, linked_id?, schedule_type, times?, days_of_week?, remind_at?, start_date?, end_date?, time_zone?, email_me?}
 async function createReminder(body, user, ctx) {
   if (!body || typeof body !== "object") return fail(400, "Missing reminder details");
   const prep = await prepare(body, {}, user, true);
@@ -343,56 +323,67 @@ async function createReminder(body, user, ctx) {
   return { status: 201, message: "Reminder added", reminder: row };
 }
 
-// PUT /reminders/:id — only the fields sent change; the result as a whole must still be a valid reminder
-async function update(id, body, user, ctx) {
-  body = body || {};
-  const { reminder, res } = await ownedReminder(id, user);
-  if (res) return res;
-  const oldData = reminderRow(reminder);
-  const prep = await prepare(body, oldData, user, false);
-  if (prep.res) return prep.res;
-  await save(reminder, prep.values);
-  const newData = reminderRow(reminder);
-  await audit({ userId: user.user_id, event: "UPDATE", targetClass: "Reminder", targetId: reminder.id, oldData, newData, ip: ctx.ip });
-  return { status: 200, message: "Reminder updated", reminder: newData };
+// --- browser saves (access.js RULES.Reminder) ---------------------------------------------------
+// The website creates, edits, turns off / on, snoozes and removes its Reminder rows with the Parse SDK
+// (Vite/src/data/reminders.ts). The rules are the old routes': prepare() checks the whole reminder and the server
+// computes what the job relies on: linked_name (from the caller's own linked row), next_due_at, last_fired_at (cleared
+// when a new time or schedule starts a once reminder over), the cleared schedule fields and the time zone (UTC when
+// blank). None of those is ever accepted from the browser.
+// Snooze (the old POST /reminders/:id/snooze) is an update that sends ONLY snooze_minutes (5 to 1440): the server sets
+// snoozed_until = its own now + that many minutes (and re-arms a once reminder that already fired); snooze_minutes
+// itself is never stored.
+const SNOOZE_FIELD = "snooze_minutes";
+// what the browser may send (linked_name, next_due_at, last_fired_at, snoozed_until: only the server sets them)
+const BROWSER_FIELDS = ["reminder_type", "title", "linked_id", "schedule_type", "time_zone", "start_date", "end_date", "times",
+  "days_of_week", "remind_at", "email_me", "active", SNOOZE_FIELD];
+const isSnooze = (body) => Object.prototype.hasOwnProperty.call(body, SNOOZE_FIELD);
+const asUser = (user) => ({ user_id: user.id });
+
+// The SDK sends remind_at as a Date; prepare() reads the route's body (an ISO string)
+function routeBody(body) {
+  const out = { ...body };
+  if (out.remind_at instanceof Date) out.remind_at = out.remind_at.toISOString();
+  return out;
 }
 
-// DELETE /reminders/:id
-async function remove(id, user, ctx) {
-  const { reminder, res } = await ownedReminder(id, user);
-  if (res) return res;
-  const oldData = reminderRow(reminder);
-  await destroy(reminder);
-  await audit({ userId: user.user_id, event: "DELETE", targetClass: "Reminder", targetId: id, oldData, ip: ctx.ip });
-  return { status: 200, message: "Reminder removed" };
+function snoozeProblem(body, original) {
+  if (!original) return "Only a saved reminder can be snoozed";
+  if (Object.keys(body).length !== 1) return "snooze_minutes can't be saved with other fields";
+  const n = body[SNOOZE_FIELD];
+  if (!Number.isInteger(n) || n < SNOOZE_MIN || n > SNOOZE_MAX) return `Snooze must be a whole number of minutes from ${SNOOZE_MIN} to ${SNOOZE_MAX}`;
+  return null;
 }
 
-// POST /reminders/:id/snooze {minutes} — hold the reminder back for 5 minutes to 24 hours from now.
-// A once reminder that already fired (and was turned off) is set to fire again at that time.
-async function snooze(id, minutes, user, ctx) {
-  const { reminder, res } = await ownedReminder(id, user);
-  if (res) return res;
-  const n = typeof minutes === "string" && /^\d+$/.test(minutes.trim()) ? Number(minutes) : minutes;
-  if (!Number.isInteger(n) || n < SNOOZE_MIN || n > SNOOZE_MAX) {
-    return fail(400, `Snooze must be a whole number of minutes from ${SNOOZE_MIN} to ${SNOOZE_MAX}`);
+// validate: the route's message, or null
+async function browserProblem(body, { user, original }) {
+  if (isSnooze(body)) return snoozeProblem(body, original);
+  const prep = await prepare(routeBody(body), original ? reminderRow(original) : {}, asUser(user), !original);
+  return prep.res ? prep.res.error : null;
+}
+
+// clean: the values to store, all computed here (next_due_at, linked_name, ...)
+async function browserValues(body, { user, original }) {
+  if (isSnooze(body)) {
+    const until = new Date(Date.now() + body[SNOOZE_FIELD] * 60 * 1000);
+    const values = { snoozed_until: until };
+    // as the old snooze: a fired once reminder (turned off when it fired) is re-armed for the snoozed time
+    if (original.get("schedule_type") === "once" && original.get("last_fired_at")) {
+      Object.assign(values, { active: true, remind_at: until, next_due_at: until, last_fired_at: null });
+    }
+    return values;
   }
-  const oldData = reminderRow(reminder);
-  const until = new Date(Date.now() + n * 60 * 1000);
-  const changes = { snoozed_until: until };
-  // A once reminder is turned off when it fires, so snoozing a fired one re-arms it for the snoozed time.
-  // One that hasn't fired keeps its own time and only waits out the snooze.
-  if (reminder.get("schedule_type") === "once" && reminder.get("last_fired_at")) {
-    Object.assign(changes, { active: true, remind_at: until, next_due_at: until, last_fired_at: null });
-  }
-  await save(reminder, changes);
-  const newData = reminderRow(reminder);
-  await audit({ userId: user.user_id, event: "UPDATE", targetClass: "Reminder", targetId: reminder.id, oldData, newData, ip: ctx.ip,
-    detail: `Snoozed ${n} minutes` });
-  return { status: 200, message: "Reminder snoozed", reminder: newData };
+  const prep = await prepare(routeBody(body), original ? reminderRow(original) : {}, asUser(user), !original);
+  if (prep.res) throw new Parse.Error(Parse.Error.VALIDATION_ERROR, prep.res.error);   // validate ran the same checks
+  return prep.values;
+}
+
+// finish: snooze_minutes is a request, not a column
+function browserFinish(obj, { body }) {
+  if (isSnooze(body)) obj.revert(SNOOZE_FIELD);
 }
 
 module.exports = {
-  zonedTime, nextOccurrence, wallParts, localDate, addDays, weekday, validZone,
-  list, get, create: createReminder, update, remove, snooze,
-  REMINDER_TYPES, SCHEDULE_TYPES, reminderRow,
+  zonedTime, nextOccurrence, wallParts, localDate, validZone,
+  create: createReminder, browserProblem, browserValues, browserFinish,
+  REMINDER_TYPES, SCHEDULE_TYPES, BROWSER_FIELDS, reminderRow,
 };

@@ -1,7 +1,9 @@
 // calendar.js — Calendar & events (Tasks 4.3 / 4.4), on Parse. Class: CalendarEvent
-//   GET/POST /calendar/events, GET/PUT/DELETE /calendar/events/:id, GET /calendar/upcoming,
-//   GET /calendar/events/:id/ics, GET /calendar/ics
-// The .ics handlers return { ics, filename, content_type } for the browser to download.
+// The website reads and writes its events with the Parse SDK (Vite/src/data/calendar.ts: the list, upcoming, the repeat
+// expansion and the .ics downloads are ported there), guarded by access.js RULES.CalendarEvent with prepareEvent's rules
+// (below). This file keeps the rules, the seed's create and the .ics builder for the subscribe
+// feed (feedIcs, calendarFeed.js). The repeat expansion lives in Vite/src/data/calendarRules.ts; keep its .ics writer
+// and the one here the same.
 //
 // Repeating events (Task 3.2). One stored event is the whole series; editing it changes every occurrence.
 //   recurrence_type      none | daily | every_n_days | weekly | monthly   (missing = none)
@@ -19,13 +21,13 @@
 // Stored time zone (Task 5.1a). time_zone is the IANA zone the event was made in (create/update body; UTC when none
 // was given, unknown zone -> 400). The .ics writes timed DTSTART/DTEND/EXDATE as local wall times with TZID=<zone>
 // (plain UTC "...Z" values when the zone is UTC) and UNTIL in UTC, so BYDAY/BYMONTHDAY land on the patient's local day.
-// List and upcoming still expand in the query's timeZone.
+// List and upcoming (calendar.ts) still expand in the browser's time zone.
 //
 // Subscribe feed (D-016): feedIcs writes the same .ics with the minimal option (title, times and repeat rule only);
 // the token handling and the public route are in calendarFeed.js.
 
-const { M, isId, isDate, isDateTime, toRow, findAll, getOwned, save, create, audit, param } = require("./db");
-const { zonedTime, wallParts, localDate, addDays, weekday, validZone } = require("./reminders");
+const { isId, isDate, isDateTime, toRow, findAll, getOwned, create, audit } = require("./db");
+const { zonedTime, wallParts, localDate, validZone } = require("./reminders");
 
 const BASE_FIELDS = ["user_id", "title", "description", "category", "start_time", "end_time", "all_day", "location", "provider_name", "status", "condition_id"];
 const REPEAT_FIELDS = ["recurrence_type", "recurrence_interval", "recurrence_weekdays", "recurrence_day", "end_type", "end_date", "end_count", "exceptions"];
@@ -37,12 +39,8 @@ const ICS_TYPE = "text/calendar; charset=utf-8";
 const REPEAT_TYPES = ["none", "daily", "every_n_days", "weekly", "monthly"];
 const END_TYPES = ["never", "date", "count"];
 const MAX_END_COUNT = 1000, MAX_INTERVAL = 365, MAX_EXCEPTIONS = 1000;
-const MAX_OCCURRENCES = 1000;   // most occurrences one series gives back from one expansion
-const DAY_MS = 24 * 60 * 60 * 1000;
-const WINDOW_MS = 366 * DAY_MS; // how far list and upcoming look when no range bound is given
 
 const row = (o) => toRow(o, "event_id", FIELDS);
-const notFound = (id) => ({ status: isId(id) ? 404 : 400, error: isId(id) ? "Event not found" : "Invalid event ID" });
 const sortEvents = (rows) => rows.sort((a, b) => a.start_time.localeCompare(b.start_time) || a.event_id.localeCompare(b.event_id));
 
 // all-day events are stored at UTC midnight of the chosen day
@@ -167,185 +165,42 @@ function validateRecurrence(body) {
 
 const pad2 = (n) => String(n).padStart(2, "0");
 // The weekdays (0 = Sunday .. 6) a stored weekly rule picks: valid whole numbers only, no repeats, ascending. [] when none.
-// Shared by the expansion (ruleDays) and the .ics (icsRule) so both read the stored rule the same way.
+// Read the same way by the .ics (icsRule) here and by the expansion in Vite/src/data/calendarRules.ts.
 const ruleWeekdays = (event) => [...new Set(Array.isArray(event.recurrence_weekdays) ? event.recurrence_weekdays.filter((d) => between(d, 0, 6)) : [])]
   .sort((a, b) => a - b);
-const daysBetween = (a, b) => Math.round((Date.parse(b) - Date.parse(a)) / DAY_MS);
 
-// The days ("YYYY-MM-DD", ascending, endless) a valid rule falls on, from `fromDay` on; null for a rule that can't
-// repeat (bad stored values), which is then shown once like a plain event.
-function ruleDays(event, firstDay, fromDay) {
-  const type = event.recurrence_type;
-  if (type === "daily" || type === "every_n_days") {
-    const step = type === "daily" ? 1 : event.recurrence_interval;
-    if (!between(step, 1, MAX_INTERVAL)) return null;
-    // the first step on or after fromDay, counted from the series' first day
-    let day = addDays(firstDay, Math.ceil(daysBetween(firstDay, fromDay) / step) * step);
-    return (function* () { for (;; day = addDays(day, step)) yield day; })();
+// The rules of a create (old = null) or an edit (old = the stored row) with `body` = the fields sent (a cleared field is
+// null; times as ISO text). {error} or {values} (the values to store; null clears a field). The old POST and PUT rules.
+async function prepareEvent(body, old, userId) {
+  if (!old) {
+    if (body.title == null || !String(body.title).trim()) return { error: "Missing required field: title" };
+    if (body.start_time == null || body.start_time === "") return { error: "Missing required field: start_time" };
   }
-  if (type === "weekly") {
-    const set = new Set(ruleWeekdays(event));
-    if (!set.size) return null;
-    return (function* () { for (let day = fromDay; ; day = addDays(day, 1)) if (set.has(weekday(day))) yield day; })();
-  }
-  if (type === "monthly") {
-    const want = event.recurrence_day;
-    if (!between(want, 1, 31)) return null;
-    return (function* () {
-      let y = +fromDay.slice(0, 4), m = +fromDay.slice(5, 7);
-      for (;;) {
-        const last = new Date(Date.UTC(y, m, 0)).getUTCDate();   // day 0 of the next month = last day of this one
-        const day = `${String(y).padStart(4, "0")}-${pad2(m)}-${pad2(Math.min(want, last))}`;
-        if (day >= fromDay) yield day;
-        if (++m > 12) { m = 1; y += 1; }
-      }
-    })();
-  }
-  return null;
-}
-
-// The occurrences of `event` (a row) that overlap [rangeStart, rangeEnd), as [{start, end, date}] with ISO
-// start/end (end null when the event has none) and the occurrence's local date. A missing bound is open.
-function expandOccurrences(event, rangeStart, rangeEnd, timeZone) {
-  const startMs = new Date(event.start_time).getTime();
-  if (isNaN(startMs)) return [];
-  const fromMs = rangeStart == null ? -Infinity : new Date(rangeStart).getTime();
-  const toMs = rangeEnd == null ? Infinity : new Date(rangeEnd).getTime();
-  if (isNaN(fromMs) || isNaN(toMs)) return [];   // an unreadable bound would never end an endless series
-  const length = event.end_time ? Math.max(new Date(event.end_time).getTime() - startMs, 0) : null;
-  const zone = event.all_day ? "UTC" : isIanaZone(timeZone) ? timeZone : "UTC";
-  const firstDay = localDate(new Date(startMs), zone);
-  const overlaps = (s) => s < toMs && s + (length || 0) >= fromMs;
-  const occurrence = (s, date) => ({ start: new Date(s).toISOString(), end: length === null ? null : new Date(s + length).toISOString(), date });
-
-  const maxCount = event.end_type === "count" && between(event.end_count, 1, MAX_END_COUNT) ? event.end_count : null;
-  // Counting needs every occurrence from the first; otherwise start a day before the earliest one that could overlap.
-  let fromDay = firstDay;
-  if (maxCount === null && fromMs > startMs) {
-    const near = addDays(localDate(new Date(fromMs - (length || 0)), zone), -1);
-    if (near > fromDay) fromDay = near;
-  }
-  let days = isRepeating(event) ? ruleDays(event, firstDay, fromDay) : null;
-  // The stored start is always the first occurrence, as DTSTART is in the .ics (RFC 5545), even when it is not a day the
-  // rule picks (a Tuesday start on a Monday/Thursday rule). It counts toward end_count like any other.
-  if (days && fromDay === firstDay) days = (function* (rest) {
-    let first = true;
-    for (const d of rest) { if (first && d !== firstDay) yield firstDay; first = false; yield d; }
-  })(days);
-  if (!days) return overlaps(startMs) ? [occurrence(startMs, firstDay)] : [];
-
-  // Each occurrence keeps the series' local time of day; the first one is the stored start itself.
-  const w = wallParts(new Date(startMs), zone);
-  const hhmm = `${pad2(w.hour)}:${pad2(w.minute)}`;
-  const extraMs = w.second * 1000 + (((startMs % 1000) + 1000) % 1000);
-  const at = (day) => (day === firstDay ? startMs : zonedTime(day, hhmm, zone).getTime() + extraMs);
-
-  const endDate = event.end_type === "date" && isDate(event.end_date) ? event.end_date : null;
-  const skip = new Set(Array.isArray(event.exceptions) ? event.exceptions : []);
-  const out = [];
-  let count = 0;
-  for (const day of days) {
-    if (endDate && day > endDate) break;
-    if (maxCount !== null && count >= maxCount) break;
-    count += 1;
-    const s = at(day);
-    if (s >= toMs) break;
-    if (skip.has(day) || !overlaps(s)) continue;
-    out.push(occurrence(s, day));
-    if (out.length >= MAX_OCCURRENCES) break;
-  }
-  return out;
-}
-
-// A repeating event row -> one row per occurrence in range (same event_id, with occurrence_date); others unchanged.
-function occurrenceRows(e, fromMs, toMs, timeZone) {
-  if (!isRepeating(e)) return [e];
-  return expandOccurrences(e, fromMs, toMs, timeZone).map((o) => ({ ...e, start_time: o.start, end_time: o.end, occurrence_date: o.date }));
-}
-
-// The patient's zone from ?timeZone= (or ?time_zone=), UTC when missing
-function zoneParam(query) {
-  const tz = param(query, "timeZone") ?? param(query, "time_zone");
-  if (tz == null) return { zone: "UTC" };
-  return validZone(tz) ? { zone: tz } : { error: "Time zone must be an IANA name such as America/New_York" };
-}
-
-async function list(query, user) {
-  const startDate = param(query, "startDate"), endDate = param(query, "endDate"), category = param(query, "category"),
-    status = param(query, "status"), limitRaw = param(query, "limit");
-  if (startDate && !isDateTime(startDate)) return { status: 400, error: "startDate is not a valid date" };
-  if (endDate && !isDateTime(endDate)) return { status: 400, error: "endDate is not a valid date" };
-  if (startDate && endDate && new Date(endDate) < new Date(startDate)) return { status: 400, error: "endDate cannot be before startDate" };
-  if (category && !CATEGORIES.includes(category)) return { status: 400, error: `Invalid category. Must be one of: ${CATEGORIES.join(", ")}` };
-  if (status && !STATUSES.includes(status)) return { status: 400, error: `Invalid status. Must be one of: ${STATUSES.join(", ")}` };
-  let limit = 500;
-  if (limitRaw != null) {
-    limit = parseInt(limitRaw, 10);
-    if (!Number.isInteger(limit) || limit < 1 || limit > 1000) return { status: 400, error: "limit must be between 1 and 1000" };
-  }
-  const tz = zoneParam(query);
-  if (tz.error) return { status: 400, error: tz.error };
-  let rows = (await findAll("CalendarEvent", { user_id: user.user_id })).map(row);
-  if (category) rows = rows.filter((e) => e.category === category);
-  if (status) rows = rows.filter((e) => e.status === status);
-  const s = startDate ? new Date(startDate.slice(0, 10)).toISOString() : null;
-  const e2 = endDate ? new Date(Date.parse(endDate.slice(0, 10)) + 86400000).toISOString() : null;
-  // Repeating events become one row per occurrence. A missing bound looks a year back from the end (or from now)
-  // and a year ahead of the start (or of now), so an endless series stays finite.
-  const toMs = e2 ? Date.parse(e2) : (s ? Date.parse(s) : Date.now()) + WINDOW_MS;
-  const fromMs = s ? Date.parse(s) : (e2 ? Date.parse(e2) : Date.now()) - WINDOW_MS;
-  rows = rows.flatMap((e) => occurrenceRows(e, fromMs, toMs, tz.zone));
-  if (s) rows = rows.filter((e) => (e.end_time || e.start_time) >= s);
-  if (e2) rows = rows.filter((e) => e.start_time < e2);
-  rows = sortEvents(rows).slice(0, limit);
-  return { status: 200, events: rows, count: rows.length };
-}
-
-async function getById(id, user) {
-  const e = await getOwned("CalendarEvent", id, user.user_id);
-  return e ? { status: 200, event: row(e) } : notFound(id);
-}
-
-async function createEvent(body, user) {
-  if (!body || typeof body !== "object") return { status: 400, error: "Missing event details" };
-  if (body.title == null || !String(body.title).trim()) return { status: 400, error: "Missing required field: title" };
-  if (body.start_time == null || body.start_time === "") return { status: 400, error: "Missing required field: start_time" };
   const err = validate(body);
-  if (err) return { status: 400, error: err };
+  if (err) return { error: err };
   const tz = readZone(body);
-  if (tz.error) return { status: 400, error: tz.error };
-  const repeat = validateRecurrence({ ...body, time_zone: tz.zone });   // the cleaned zone decides the start day
-  if (repeat.error) return { status: 400, error: repeat.error };
-  const values = { category: "appointment", status: "scheduled", all_day: false, ...repeat.values, time_zone: tz.zone || "UTC" };
-  for (const f of EDITABLE) if (body[f] != null) values[f] = value(f, body[f]);
-  if (values.all_day) {
-    values.start_time = allDayMidnight(body.start_time);
-    if (values.end_time) values.end_time = allDayMidnight(body.end_time);
-  }
-  if (values.end_time && values.end_time < values.start_time) return { status: 400, error: "end_time cannot be before start_time" };
-  const condErr = await checkCondition(body, user);
-  if (condErr) return { status: 400, error: condErr };
-  const e = await create("CalendarEvent", { ...values, user_id: user.user_id });
-  const data = row(e);
-  await audit({ userId: user.user_id, event: "INSERT", targetClass: "CalendarEvent", targetId: e.id, newData: data });
-  return { status: 201, message: "Event created", event: data };
-}
+  if (tz.error) return { error: tz.error };
+  if (old) for (const f of ["title", "start_time", "category", "status", "all_day"]) if (body[f] === null) return { error: `${f} can't be cleared` };
+  // an edit keeps the stored zone unless a new one is sent; an unset / blank zone is refused (it would drop the zone)
+  if (old && "time_zone" in body && blank(body.time_zone)) return { error: "time_zone can't be cleared" };
+  const condErr = await checkCondition(body, { user_id: userId });
+  if (condErr) return { error: condErr };
 
-async function update(id, body, user) {
-  if (!body || typeof body !== "object") return { status: 400, error: "No fields to update" };
+  if (!old) {
+    const repeat = validateRecurrence({ ...body, time_zone: tz.zone });   // the cleaned zone decides the start day
+    if (repeat.error) return { error: repeat.error };
+    const values = { category: "appointment", status: "scheduled", all_day: false, ...repeat.values, time_zone: tz.zone || "UTC" };
+    for (const f of EDITABLE) if (body[f] != null) values[f] = value(f, body[f]);
+    if (values.all_day) {
+      values.start_time = allDayMidnight(body.start_time);
+      if (values.end_time) values.end_time = allDayMidnight(body.end_time);
+    }
+    if (values.end_time && values.end_time < values.start_time) return { error: "end_time cannot be before start_time" };
+    return { values };
+  }
+
   const fields = EDITABLE.filter((f) => body[f] !== undefined);
   const repeatFields = REPEAT_FIELDS.filter((f) => body[f] !== undefined);
-  const tz = readZone(body);
-  if (!fields.length && !repeatFields.length && !tz.zone && !tz.error) return { status: 400, error: "No fields to update" };
-  const err = validate(body);
-  if (err) return { status: 400, error: err };
-  if (tz.error) return { status: 400, error: tz.error };
-  for (const f of ["title", "start_time", "category", "status", "all_day"]) if (body[f] === null) return { status: 400, error: `${f} can't be cleared` };
-  const e = await getOwned("CalendarEvent", id, user.user_id);
-  if (!e) return notFound(id);
-  const condErr = await checkCondition(body, user);
-  if (condErr) return { status: 400, error: condErr };
-  const old = row(e);
   const updates = {};
   for (const f of fields) updates[f] = value(f, body[f]);
   if (tz.zone) updates.time_zone = tz.zone;   // the stored zone stays unless a new one is sent
@@ -358,63 +213,50 @@ async function update(id, body, user) {
     if (nextAllDay !== old.all_day || "start_time" in updates) updates.start_time = nextStart;
     if (nextAllDay !== old.all_day || "end_time" in updates) updates.end_time = nextEnd;
   }
-  if (nextEnd && nextEnd < nextStart) return { status: 400, error: "end_time cannot be before start_time" };
+  if (nextEnd && nextEnd < nextStart) return { error: "end_time cannot be before start_time" };
   // The rule is checked as the whole series will be stored, so a new start can't land after its end date
   if (repeatFields.length || "start_time" in updates || "all_day" in updates || "time_zone" in updates) {
     const merged = { ...old, ...Object.fromEntries(repeatFields.map((f) => [f, body[f]])),
       start_time: "start_time" in body ? body.start_time : old.start_time, all_day: nextAllDay, time_zone: tz.zone || old.time_zone };
     const repeat = validateRecurrence(merged);
-    if (repeat.error) return { status: 400, error: repeat.error };
+    if (repeat.error) return { error: repeat.error };
+    // skipping an occurrence (the old DELETE /calendar/events/:id/occurrences/:date) = an edit of exceptions
+    if ("exceptions" in body && !blank(body.exceptions) && !isRepeating(repeat.values)) return { error: "This event does not repeat" };
     if (repeatFields.length) Object.assign(updates, repeat.values);
   }
-  await save(e, updates);
+  return { values: updates };
+}
+
+// The seed's create (seed.js calls it directly; the website saves CalendarEvent rows with the Parse SDK, below)
+async function createEvent(body, user) {
+  if (!body || typeof body !== "object") return { status: 400, error: "Missing event details" };
+  const prep = await prepareEvent(body, null, user.user_id);
+  if (prep.error) return { status: 400, error: prep.error };
+  const e = await create("CalendarEvent", { ...prep.values, user_id: user.user_id });
   const data = row(e);
-  await audit({ userId: user.user_id, event: "UPDATE", targetClass: "CalendarEvent", targetId: e.id, oldData: old, newData: data });
-  return { status: 200, message: "Event updated", event: data };
+  await audit({ userId: user.user_id, event: "INSERT", targetClass: "CalendarEvent", targetId: e.id, newData: data });
+  return { status: 201, message: "Event created", event: data };
 }
 
-async function remove(id, user) {
-  const e = await getOwned("CalendarEvent", id, user.user_id);
-  if (!e) return notFound(id);
-  const old = row(e);
-  await e.destroy(M);
-  await audit({ userId: user.user_id, event: "DELETE", targetClass: "CalendarEvent", targetId: id, oldData: old });
-  return { status: 200, message: "Event deleted" };
+// ---------- browser saves (access.js RULES.CalendarEvent) ----------
+// The website reads, creates, edits, removes and skips occurrences of its CalendarEvent rows with the Parse SDK
+// (Vite/src/data/calendar.ts, which also expands the repeats and writes the .ics downloads). The rules are prepareEvent's:
+// the server stores the cleaned values (all-day times at UTC midnight, the time zone, the normalised repeat fields), and
+// condition_id must be one of the caller's own conditions. Skipping an occurrence = an edit that sends `exceptions`.
+const BROWSER_FIELDS = [...EDITABLE, ...REPEAT_FIELDS, "time_zone"];
+// the SDK sends start_time / end_time as Dates; the rules read the route's ISO text
+function routeBody(body) {
+  const out = { ...body };
+  for (const f of ["start_time", "end_time"]) if (out[f] instanceof Date) out[f] = out[f].toISOString();
+  return out;
 }
-
-// DELETE /calendar/events/:id/occurrences/:date — skip one occurrence of a series by adding its local date to
-// exceptions (once; skipping it again changes nothing). The rest of the series is untouched.
-async function skipOccurrence(id, date, user, ctx) {
-  if (!isId(id)) return { status: 400, error: "Invalid event ID" };
-  if (!isDate(date)) return { status: 400, error: "Use the date format YYYY-MM-DD" };
-  const e = await getOwned("CalendarEvent", id, user.user_id);
-  if (!e) return notFound(id);
-  const old = row(e);
-  if (!isRepeating(old)) return { status: 400, error: "This event does not repeat" };
-  const current = Array.isArray(old.exceptions) ? old.exceptions : [];
-  if (!current.includes(date)) {
-    if (current.length >= MAX_EXCEPTIONS) return { status: 400, error: `Too many skipped dates (max ${MAX_EXCEPTIONS})` };
-    await save(e, { exceptions: [...current, date].sort() });
-    await audit({ userId: user.user_id, event: "UPDATE", targetClass: "CalendarEvent", targetId: e.id, oldData: old, newData: row(e),
-      ip: ctx && ctx.ip, detail: `Skipped occurrence ${date}` });
-  }
-  return { status: 200, message: "Occurrence skipped", event: row(e) };
+async function browserProblem(body, { user, original }) {
+  return (await prepareEvent(routeBody(body), original ? row(original) : null, user.id)).error || null;
 }
-
-async function upcoming(query, user) {
-  let limit = 5;
-  const limitRaw = param(query, "limit");
-  if (limitRaw != null) {
-    limit = parseInt(limitRaw, 10);
-    if (!Number.isInteger(limit) || limit < 1 || limit > 50) return { status: 400, error: "limit must be between 1 and 50" };
-  }
-  const tz = zoneParam(query);
-  if (tz.error) return { status: 400, error: tz.error };
-  const now = Date.now();
-  const rows = sortEvents((await findAll("CalendarEvent", { user_id: user.user_id, status: "scheduled" })).map(row)
-    .flatMap((e) => occurrenceRows(e, now - DAY_MS, now + WINDOW_MS, tz.zone))
-    .filter((e) => Date.parse(e.end_time || e.start_time) + (e.all_day ? 86400000 : 0) > now)).slice(0, limit);
-  return { status: 200, events: rows, count: rows.length };
+async function browserValues(body, { user, original }) {
+  const prep = await prepareEvent(routeBody(body), original ? row(original) : null, user.id);
+  if (prep.error) throw new Parse.Error(Parse.Error.VALIDATION_ERROR, prep.error);   // validate ran the same checks
+  return prep.values;
 }
 
 // ---------- .ics (RFC 5545) ----------
@@ -533,14 +375,7 @@ async function feedIcs(userId) {
     .map((e) => Object.fromEntries(FEED_FIELDS.map((f) => [f, e[f]])));
   return buildCalendar(rows, FEED_CAL_NAME, { minimal: true });
 }
-async function eventIcs(id, user) {
-  const e = await getOwned("CalendarEvent", id, user.user_id);
-  if (!e) return notFound(id);
-  return { status: 200, ics: buildCalendar([row(e)]), filename: `event-${id}.ics`, content_type: ICS_TYPE };
-}
-async function calendarIcs(user) {
-  const rows = sortEvents((await findAll("CalendarEvent", { user_id: user.user_id })).map(row).filter((e) => e.status !== "cancelled"));
-  return { status: 200, ics: buildCalendar(rows), filename: "calendar.ics", content_type: ICS_TYPE, event_count: rows.length };
-}
-
-module.exports = { list, getById, create: createEvent, update, remove, skipOccurrence, upcoming, eventIcs, calendarIcs, feedIcs, validateRecurrence, expandOccurrences, ICS_TYPE };
+module.exports = {
+  create: createEvent, feedIcs, validateRecurrence, browserProblem, browserValues,
+  BROWSER_FIELDS, ICS_TYPE, row,
+};

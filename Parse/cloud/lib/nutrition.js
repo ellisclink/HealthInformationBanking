@@ -1,24 +1,66 @@
 // nutrition.js — Nutrition logging (Tasks 1–4), on Parse. Class: NutritionLog
-//   POST /nutrition/search {query}   USDA FoodData Central search (set USDA_API_KEY; DEMO_KEY otherwise)
-//   POST /nutrition/log              add a food entry
-//   GET  /nutrition/logs             entries between startDate and endDate (default: last 30 days)
-//   GET  /nutrition/summary?date=    totals for one day
-//   logs and summary take tz (IANA zone, UTC when missing): a log's day, and the dates asked for, are local days in tz
-//   PUT  /nutrition/log/:id, DELETE /nutrition/log/:id
+//   POST /nutrition/search {query}   USDA FoodData Central search (set USDA_API_KEY; DEMO_KEY otherwise). Stays on the
+//                                    server: the USDA key must never reach the browser.
+//   The Nutrition page reads and saves its log with the Parse SDK (Vite/src/data/nutrition.ts: logs, the daily summary,
+//   add / edit / delete); the owner-only rules in access.js (RULES.NutritionLog) use validate/clean/row from here.
+//   There are no /nutrition/log, /nutrition/logs or /nutrition/summary routes any more. log() is used by seed.
 
-const { M, isId, isDate, isDateTime, toRow, findAll, getOwned, save, create, audit, param } = require("./db");
-const { localDate, addDays, validZone } = require("./reminders");   // the local-day helpers calendar and reminders use
+const { isDateTime, toRow, create, audit } = require("./db");
 
 const FIELDS = ["user_id", "food_name", "usda_fdc_id", "serving_size", "serving_unit", "logged_at", "calories", "protein_g", "carbs_g",
   "fat_g", "fiber_g", "sugar_g", "sodium_mg", "source", "confidence", "notes"];
 const NUMBERS = ["serving_size", "calories", "protein_g", "carbs_g", "fat_g", "fiber_g", "sugar_g", "sodium_mg", "confidence"];
-// the API takes camelCase (as before) and stores snake_case
+const TEXT_MAX = { food_name: 255, usda_fdc_id: 255, serving_unit: 255, notes: 2000 };
+const REQUIRED = ["food_name", "serving_size", "serving_unit"];
+// seed's log() takes camelCase (as the old route did) and stores snake_case
 const CAMEL = { foodName: "food_name", usdaFdcId: "usda_fdc_id", servingSize: "serving_size", servingUnit: "serving_unit", calories: "calories",
   proteinG: "protein_g", carbsG: "carbs_g", fatG: "fat_g", fiberG: "fiber_g", sugarG: "sugar_g", sodiumMg: "sodium_mg", confidence: "confidence",
   notes: "notes", loggedAt: "logged_at" };
 const row = (o) => toRow(o, "log_id", FIELDS);
 const USDA = "https://api.nal.usda.gov/fdc/v1";
 const NUTRIENTS = { 1008: "calories", 1003: "proteinG", 1005: "carbsG", 1004: "fatG", 1079: "fiberG", 2000: "sugarG", 1093: "sodiumMg" };
+
+// a missing, null or all-spaces value
+const blank = (v) => v === undefined || v === null || (typeof v === "string" && !v.trim());
+
+// Field rules for a NutritionLog the browser saves (snake_case names, values already type-checked by access.js: numbers
+// are numbers, logged_at is a Date). Create checks all; update checks only what was sent. Returns an error or null.
+// The old route's rules (numbers 0 or more, a valid logged_at, required food/serving), plus: a serving size above 0,
+// a food name that is not only spaces, and text that is too long is refused (the route cut it short).
+function validate(body, partial) {
+  for (const f of REQUIRED) {
+    if (!partial && blank(body[f])) return "Missing required fields: food_name, serving_size, serving_unit";
+    if (partial && f in body && blank(body[f])) return "food_name, serving_size and serving_unit can't be cleared";
+  }
+  // every entry has a time (the log and the daily summary go by logged_at): an edit may move it, never clear it
+  if (partial && "logged_at" in body && body.logged_at === null) return "logged_at can't be cleared";
+  for (const f of NUMBERS) {
+    const v = body[f];
+    if (v !== undefined && v !== null && (typeof v !== "number" || !Number.isFinite(v) || v < 0)) return `${f} must be a number of 0 or more`;
+  }
+  if (typeof body.serving_size === "number" && body.serving_size <= 0) return "serving_size must be more than 0";
+  for (const [f, max] of Object.entries(TEXT_MAX)) {
+    if (typeof body[f] === "string" && body[f].trim().length > max) return `${f} is too long (max ${max})`;
+  }
+  const at = body.logged_at;
+  if (at !== undefined && at !== null && !(at instanceof Date && !isNaN(at.getTime()))) return "logged_at is not a valid date/time";
+  return null;
+}
+
+// The values to store: text trimmed (blank = cleared). A new entry is logged now unless logged_at was sent, and its
+// source is set by the server (usda_api when it came from a USDA search, manual otherwise), as log() did.
+function clean(body, partial) {
+  const out = {};
+  for (const [f, v] of Object.entries(body)) {
+    if (v === undefined) continue;
+    out[f] = v === null ? null : typeof v === "string" ? v.trim() || null : v;
+  }
+  if (!partial) {
+    if (!out.logged_at) out.logged_at = new Date();
+    out.source = out.usda_fdc_id ? "usda_api" : "manual";
+  }
+  return out;
+}
 
 function fromBody(body) {
   const out = {};
@@ -59,6 +101,7 @@ async function search(body) {
   }
 }
 
+// a food entry made by the server (seed and the tests; the website saves through the Parse SDK)
 async function log(body, user) {
   if (!body || !(body.foodName || body.food_name) || !(body.servingSize || body.serving_size) || !(body.servingUnit || body.serving_unit)) {
     return { status: 400, error: "Missing required fields: foodName, servingSize, servingUnit" };
@@ -72,66 +115,5 @@ async function log(body, user) {
   return { status: 201, message: "Nutrition log entry created", logId: o.id, createdAt: data.created_at };
 }
 
-const DATE_FORMAT_ERROR = "Use the date format YYYY-MM-DD";
-
-// The patient's zone from the `tz` query parameter: an IANA name, UTC when missing.
-function zoneOf(query) {
-  const tz = param(query, "tz") || "UTC";
-  return validZone(tz) ? { tz } : { error: "Unknown time zone" };
-}
-
-// A log's calendar day in the patient's zone (logged_at is stored as a UTC instant and left as is).
-const dayOf = (r, tz) => localDate(new Date(r.logged_at), tz);
-
-async function logs(query, user) {
-  const { tz, error } = zoneOf(query);
-  if (error) return { status: 400, error };
-  const today = localDate(new Date(), tz);
-  const startDate = param(query, "startDate") || addDays(today, -30);
-  const endDate = param(query, "endDate") || today;
-  // startDate and endDate are local days in tz, so only YYYY-MM-DD is accepted (a date-time would be read as a UTC day)
-  if (!isDate(startDate) || !isDate(endDate)) return { status: 400, error: DATE_FORMAT_ERROR };
-  const first = startDate, last = endDate;
-  const rows = (await findAll("NutritionLog", { user_id: user.user_id })).map(row)
-    .filter((r) => r.logged_at && dayOf(r, tz) >= first && dayOf(r, tz) <= last)
-    .sort((a, b) => b.logged_at.localeCompare(a.logged_at));
-  return { status: 200, logs: rows };
-}
-
-async function summary(query, user) {
-  const { tz, error } = zoneOf(query);
-  if (error) return { status: 400, error };
-  const day = param(query, "date") || localDate(new Date(), tz);
-  if (!isDate(day)) return { status: 400, error: DATE_FORMAT_ERROR };
-  const rows = (await findAll("NutritionLog", { user_id: user.user_id })).map(row).filter((r) => r.logged_at && dayOf(r, tz) === day);
-  const sum = (k) => Number(rows.reduce((s, r) => s + (Number(r[k]) || 0), 0).toFixed(2));
-  return { status: 200, summary: { date: day, meal_count: rows.length, total_calories: sum("calories"), total_protein: sum("protein_g"),
-    total_carbs: sum("carbs_g"), total_fat: sum("fat_g"), total_fiber: sum("fiber_g"), total_sugar: sum("sugar_g"), total_sodium: sum("sodium_mg") } };
-}
-
-async function update(id, body, user) {
-  if (!isId(id)) return { status: 400, error: "Invalid log ID" };
-  const o = await getOwned("NutritionLog", id, user.user_id);
-  if (!o) return { status: 404, error: "Log entry not found" };
-  const { values, error } = fromBody(body || {});
-  if (error) return { status: 400, error };
-  if (!Object.keys(values).length) return { status: 400, error: "No fields to update" };
-  if (values.food_name === null || values.serving_size === null || values.serving_unit === null) return { status: 400, error: "foodName, servingSize and servingUnit can't be cleared" };
-  const old = row(o);
-  await save(o, values);
-  const data = row(o);
-  await audit({ userId: user.user_id, event: "UPDATE", targetClass: "NutritionLog", targetId: o.id, oldData: old, newData: data });
-  return { status: 200, message: "Nutrition log updated", log: data };
-}
-
-async function remove(id, user) {
-  if (!isId(id)) return { status: 400, error: "Invalid log ID" };
-  const o = await getOwned("NutritionLog", id, user.user_id);
-  if (!o) return { status: 404, error: "Log entry not found" };
-  const old = row(o);
-  await o.destroy(M);
-  await audit({ userId: user.user_id, event: "DELETE", targetClass: "NutritionLog", targetId: id, oldData: old });
-  return { status: 200, message: "Nutrition log deleted" };
-}
-
-module.exports = { search, log, logs, summary, update, remove };
+// validate, clean, row and FIELDS are also used by access.js (RULES.NutritionLog: the browser saves NutritionLog directly)
+module.exports = { search, log, validate, clean, row, FIELDS, NUMBERS };

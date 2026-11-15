@@ -1,18 +1,22 @@
 // disposal.js — Safe medication disposal (Task 6-1).
-//   GET    /disposal/methods          the eight disposal methods, with steps and links
-//   GET    /disposal/guidance         how to dispose of one medicine (name, brand, form, route)
-//   GET    /disposal/due              stopped, completed or expired medicines still on hand (flush list first)
-//   GET    /disposal/logs             disposal history
-//   POST   /disposal/logs             record a disposal; takes the quantity off the medicine's count
-//   DELETE /disposal/logs/:id         remove a history entry (the count is not changed back)
+// The Safe Disposal page works with the Parse SDK (Vite/src/data/disposal.ts; the methods and the guidance rules are
+// copied to Vite/src/data/disposalGuide.ts): it reads its DisposalLog rows, records a disposal (create) and removes a
+// history entry (delete; the count is not changed back), guarded by RULES.DisposalLog in access.js with the rules below
+// (logProblem / logValues = the old POST /disposal/logs rules). After a browser save, afterLogSave takes the quantity off
+// the medicine's count (master key, atomic, never below 0) and marks a used-up active medicine completed.
+// Order: the DisposalLog row is saved FIRST and the count is lowered after it (the old route lowered the count first). So
+// if the count update fails, the log row stays; that failure is written to the audit log (event DISPOSAL_COUNT_FAILED,
+// detail { count_lowered, count_not_updated, ... }: whether the subtract itself had gone through) so it can be found
+// and fixed by hand.
+// due() and guidanceFor() stay for notifications.runAll (the leftover-medicine alert); createLog() for the seed.
 // Classes: DisposalLog (Medication is read and updated)
 //
 // The lists below are matched by whole words, in order: "norco" matches "Norco 10/325",
 // "ms contin" needs both words. Check them against the current FDA and DEA pages (LINKS)
 // whenever they change.
 
-const { isId, isDate, today, toRow, findAll, getOwned, save, create, destroy, audit, param, optText, maxDate, fail } = require("./db");
-const { medRow, withInventoryInfo } = require("./medications");
+const { M, isId, isDate, today, toRow, findAll, getOwned, save, create, audit, optText, maxDate, fail } = require("./db");
+const { medRow, withInventoryInfo, takePills } = require("./medications");
 
 const GENERAL_NOTE = "General guidance, not a pharmacist. Follow the label, and ask your pharmacist if you're unsure.";
 const LOG_FIELDS = ["user_id", "medication_id", "medication_name", "method", "location", "disposed_date", "notes", "quantity"];
@@ -180,29 +184,8 @@ function guidanceFor(med) {
   };
 }
 
-// GET /disposal/methods
-function methods() {
-  return {
-    status: 200,
-    methods: METHOD_KEYS.map((key) => ({ key, title: METHODS[key].title, summary: METHODS[key].summary, steps: METHODS[key].steps, links: pickLinks(METHODS[key].links) })),
-    note: GENERAL_NOTE,
-  };
-}
-
-// GET /disposal/guidance?name=&brand=&form=&route=
-function guidance(query) {
-  const name = param(query, "name");
-  const brand = param(query, "brand");
-  if (!name && !brand) return fail(400, "Type the medicine's name");
-  if (String(name || "").length > 200 || String(brand || "").length > 200) return fail(400, "Names must be 200 characters or fewer");
-  const med = {
-    medication_name: name, brand_name: brand,
-    dosage_form: param(query, "form"), route: param(query, "route"),
-  };
-  return { status: 200, guidance: guidanceFor(med), note: GENERAL_NOTE };
-}
-
-// GET /disposal/due — medicines still on hand that are stopped, completed or past their end date
+// Medicines still on hand that are stopped, completed or past their end date (the leftover-medicine alert in
+// notifications.js; the page builds the same list in disposal.ts)
 async function due(user) {
   const t = today();
   const meds = (await findAll("Medication", { user_id: user.user_id })).map(medRow);
@@ -217,12 +200,6 @@ async function due(user) {
   rows.sort((a, b) => Number(b.guidance.on_flush_list) - Number(a.guidance.on_flush_list) ||
     String(a.medication_name || "").localeCompare(String(b.medication_name || "")));
   return { status: 200, medications: rows, note: GENERAL_NOTE };
-}
-
-// GET /disposal/logs
-async function listLogs(user) {
-  const logs = await findAll("DisposalLog", { user_id: user.user_id }, { descending: "disposed_date" });
-  return { status: 200, logs: logs.map(logRow) };
 }
 
 // Quantities may have decimals (12.5 mL), up to 2 places. Counts are compared with a tolerance so float error
@@ -242,7 +219,8 @@ function readQuantity(q) {
   return rounded > 0 ? rounded : null;   // something like 1e-9 rounds to 0.00: the smallest quantity is 0.01
 }
 
-// POST /disposal/logs {medication_id | medication_name, quantity, method, location?, disposed_date?, notes?}
+// The seed's disposal {medication_id | medication_name, quantity, method, location?, disposed_date?, notes?} (the page
+// saves DisposalLog rows itself, below)
 async function createLog(body, user, ctx) {
   const quantity = readQuantity(body.quantity);
   if (quantity === null) return fail(400, QUANTITY_ERROR);
@@ -317,15 +295,99 @@ async function createLog(body, user, ctx) {
   return { status: 201, message: "Disposal recorded", log: row, medication };
 }
 
-// DELETE /disposal/logs/:id — removes the history entry only; the count is not changed back
-async function removeLog(id, user, ctx) {
-  if (!isId(id)) return fail(400, "Invalid disposal record ID");
-  const log = await getOwned("DisposalLog", id, user.user_id);
-  if (!log) return fail(404, "Disposal record not found");
-  const oldData = logRow(log);
-  await destroy(log);
-  await audit({ userId: user.user_id, event: "DELETE", targetClass: "DisposalLog", targetId: id, oldData, ip: ctx.ip });
-  return { status: 200, message: "Disposal record removed" };
+// ---------- browser saves (access.js RULES.DisposalLog) ----------
+const LOG_BROWSER_FIELDS = ["medication_id", "medication_name", "method", "location", "disposed_date", "notes", "quantity"];
+// The medicine a disposal is for: by medication_id (one of the caller's own; the rule's parent check refuses any other
+// with 101), else the caller's medicine with that name and the most left. { med, name } (med null when none matches).
+async function logMedication(body, userId) {
+  if (body.medication_id) return { med: await getOwned("Medication", body.medication_id, userId), name: null };
+  const name = typeof body.medication_name === "string" ? body.medication_name.trim() : "";
+  const wanted = name.toLowerCase();
+  const matches = (await findAll("Medication", { user_id: userId }))
+    .filter((m) => String(m.get("medication_name") || "").trim().toLowerCase() === wanted)
+    .sort((x, y) => (Number(y.get("quantity_on_hand")) || 0) - (Number(x.get("quantity_on_hand")) || 0));
+  return { med: matches[0] || null, name };
+}
+// the old createLog() checks, in the same order and with the same messages
+async function logProblem(body, { user }) {
+  if (readQuantity(body.quantity) === null) return QUANTITY_ERROR;
+  if (!METHOD_KEYS.includes(body.method)) return "Choose how you got rid of it";
+  const location = optText(body.location, 200, "Location");
+  if (location.error) return location.error;
+  const notes = optText(body.notes, 500, "Notes");
+  if (notes.error) return notes.error;
+  const date = body.disposed_date || today();
+  if (!isDate(date)) return "Use the date format YYYY-MM-DD";
+  if (date > maxDate()) return "The disposal date can't be in the future";
+  if (body.medication_id) {
+    if (!isId(body.medication_id)) return "Invalid medication ID";
+  } else {
+    const name = typeof body.medication_name === "string" ? body.medication_name.trim() : "";
+    if (!name) return "Choose the medicine, or type its name";
+    if (name.length > 200) return "Medicine name must be 200 characters or fewer";
+  }
+  const { med } = await logMedication(body, user.id);
+  if (!med) return null;   // a name with no match is recorded as typed; a medication_id that isn't theirs: 101 (parent)
+  const onHand = Number(med.get("quantity_on_hand")) || 0;
+  // A medicine typed by name whose count is 0 (used up, or never counted) is recorded as it is: the count stays 0.
+  const countsStock = !!body.medication_id || onHand > TOLERANCE;
+  if (countsStock && readQuantity(body.quantity) > onHand + TOLERANCE) return `Only ${cleanCount(onHand)} left on hand`;
+  return null;
+}
+async function logValues(body, { user }) {
+  const { med, name } = await logMedication(body, user.id);
+  return {
+    medication_id: med ? med.id : null,
+    medication_name: med ? med.get("medication_name") : name,
+    method: body.method,
+    location: optText(body.location, 200, "Location").value,
+    disposed_date: body.disposed_date || today(),
+    notes: optText(body.notes, 500, "Notes").value,
+    quantity: readQuantity(body.quantity),
+  };
+}
+// After a browser disposal (once, for the new row): the quantity comes off the medicine's count with an atomic
+// subtract that never leaves it below 0 (medications.takePills), float noise is cleaned up, and a used-up active
+// medicine is marked completed (end_date today when it has none), as createLog() did. A medicine with nothing on hand
+// is left alone. The Medication change is audited (UPDATE) like the old route's. A failure is logged and audited
+// (DISPOSAL_COUNT_FAILED), never thrown: the disposal row is already saved. The audit detail says whether the subtract
+// itself went through before the failure: count_lowered true (the failure came in the clean-up, the status change or
+// the Medication audit after it) or false with count_not_updated true (the count was not changed).
+async function afterLogSave(log, { original, ip }) {
+  if (original) return;
+  const medId = log.get("medication_id");
+  if (!medId) return;
+  const progress = { countLowered: false };
+  try {
+    await lowerCount(log, medId, ip, progress);
+  } catch (err) {
+    const message = err && err.message ? String(err.message).slice(0, 200) : "error";
+    console.error("disposal: updating quantity_on_hand failed:", message);
+    await audit({ userId: log.get("user_id"), event: "DISPOSAL_COUNT_FAILED", targetClass: "DisposalLog", targetId: log.id, ip,
+      detail: { count_not_updated: !progress.countLowered, count_lowered: progress.countLowered, medication_id: medId,
+        quantity: log.get("quantity") ?? null, error: message } });
+  }
 }
 
-module.exports = { methods, guidance, due, listLogs, createLog, removeLog, guidanceFor, decide, GENERAL_NOTE, TOLERANCE };
+async function lowerCount(log, medId, ip, progress = {}) {
+  const med = await new Parse.Query("Medication").get(medId, M);
+  if (!((Number(med.get("quantity_on_hand")) || 0) > TOLERANCE)) return;
+  const oldData = medRow(med);
+  const left = await takePills(med, Number(log.get("quantity")));
+  progress.countLowered = true;
+  const clean = cleanCount(Math.max(0, left));
+  const fix = Parse.Object.extend("Medication").createWithoutData(med.id);
+  if (clean !== left) fix.increment("quantity_on_hand", clean - left);
+  if (clean === 0 && med.get("status") === "active") {
+    fix.set("status", "completed");
+    if (!med.get("end_date")) fix.set("end_date", today());
+  }
+  if (fix.dirtyKeys().length) await fix.save(null, M);
+  const after = await new Parse.Query("Medication").get(med.id, M);
+  await audit({ userId: log.get("user_id"), event: "UPDATE", targetClass: "Medication", targetId: med.id, oldData, newData: medRow(after), ip });
+}
+
+module.exports = {
+  due, createLog, guidanceFor, decide, GENERAL_NOTE, TOLERANCE,
+  LOG_BROWSER_FIELDS, logProblem, logValues, afterLogSave, logRow,
+};

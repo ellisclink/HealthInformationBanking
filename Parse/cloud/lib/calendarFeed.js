@@ -140,7 +140,7 @@ async function createToken(body, user, ctx = {}) {
 // Is the caller's session still there? Both rows must exist and belong to the user:
 //  - Parse's own _Session row for the session token (read with the master key). endAllSessions (password reset)
 //    deletes these FIRST, so checking it closes the gap before the SessionActivity rows are deleted.
-//  - the SessionActivity row auth.checkSession creates (keyed by the SHA-256 of the session token).
+//  - the SessionActivity row auth.afterLogin creates at login (keyed by the SHA-256 of the session token).
 async function sessionLive(ctx, userId) {
   if (!ctx || typeof ctx.sessionToken !== "string" || !ctx.sessionToken) return false;
   const q = new Parse.Query(Parse.Session);

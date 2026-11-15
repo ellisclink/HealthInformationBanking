@@ -1,13 +1,17 @@
 // safety.js — Allergy & prescription safety (Task 5.3), on Parse.
-//   GET  /safety/allergies                  the patient's allergies (from the Health History form) + drug families
-//   GET  /safety/alerts                     re-check every medication and return the warnings
+//   POST /safety/recheck                    re-check every medication and save the warnings (SafetyAlert rows; server only)
 //   POST /safety/check                      {medication_name, brand_name?} -> warnings BEFORE adding (saves nothing)
-//   POST /safety/alerts/:id/acknowledge     {acknowledged?: true|false, note?} "I've talked to my doctor"
+// The website reads SafetyAlert rows and acknowledges them ("I've talked to my doctor") with the Parse SDK
+// (Vite/src/data/safety.ts), guarded by RULES.SafetyAlert in access.js: never created or removed from the browser, and
+// an edit may only set or clear acknowledged_at (the server's time) / acknowledged_note. Allergy rows may be read, and
+// added / edited / removed by the browser (RULES.Allergy: allergyProblem / allergyValues below; the server computes
+// allergen_key, allergen_type and drug_classes); the rows copied from the Health History form can only be changed there.
+// getAlerts stays for the PDF auto-fill, the C-CDA import and the seed (the pre-visit summary is built by the website).
 // Classes: Allergy (kept in step with the form), SafetyAlert. Drug families, members,
 // cross-reactions and interactions are in reference.js.
 // This is a safety net built on a short list of common drugs, not a pharmacist's review.
 
-const { M, isId, toRow, findAll, findOne, save, create, destroyAll, audit } = require("./db");
+const { M, toRow, findAll, oldestRow, save, create, destroyAll, audit } = require("./db");
 const R = require("./reference");
 
 const SEVERITY_RANK = { major: 0, moderate: 1, minor: 2 };
@@ -189,7 +193,7 @@ const sortAlerts = (list) => list.sort((x, y) =>
 async function syncAllergiesFromRecord(userId, recordData) {
   let data = recordData;
   if (data === undefined) {
-    const rec = await findOne("MedicalRecord", { user_id: userId });
+    const rec = await oldestRow("MedicalRecord", userId);
     data = rec ? rec.get("data") || {} : {};
   }
   const listed = new Map();
@@ -206,15 +210,23 @@ async function syncAllergiesFromRecord(userId, recordData) {
     const values = { allergen: a.allergen, reaction: a.reaction, severity: reactionSeverity(a.reaction),
       allergen_type: allergenType(ref, a.allergen), drug_classes: [...classifyAllergen(ref, a.allergen).classes].sort(), status: "active" };
     const old = byKey.get(key);
+    // the form now lists an allergen that was added on its own (a browser row): the form takes it over, so removing it
+    // from the form later removes the row, and it can then only be changed on the form
+    const claim = old && old.get("source") !== FORM_SOURCE ? { source: FORM_SOURCE } : {};
+    const sourceChange = claim.source ? { source: old.get("source") ?? null } : {};
     if (!old) {
-      const o = await create("Allergy", { ...values, user_id: userId, allergen_key: key, source: "health_history_form" });
+      const o = await create("Allergy", { ...values, user_id: userId, allergen_key: key, source: FORM_SOURCE });
       await audit({ userId, event: "INSERT", targetClass: "Allergy", targetId: o.id, newData: { allergen: a.allergen, reaction: a.reaction } });
     } else if (old.get("allergen") !== a.allergen || (old.get("reaction") || null) !== a.reaction) {
-      const before = { allergen: old.get("allergen"), reaction: old.get("reaction") || null };
-      await save(old, values);
-      await audit({ userId, event: "UPDATE", targetClass: "Allergy", targetId: old.id, oldData: before, newData: { allergen: a.allergen, reaction: a.reaction } });
+      const before = { allergen: old.get("allergen"), reaction: old.get("reaction") || null, ...sourceChange };
+      await save(old, { ...values, ...claim });
+      await audit({ userId, event: "UPDATE", targetClass: "Allergy", targetId: old.id, oldData: before, newData: { allergen: a.allergen, reaction: a.reaction, ...claim } });
     } else if (JSON.stringify(old.get("drug_classes") || []) !== JSON.stringify(values.drug_classes) || old.get("allergen_type") !== values.allergen_type) {
-      await save(old, { drug_classes: values.drug_classes, allergen_type: values.allergen_type });
+      await save(old, { drug_classes: values.drug_classes, allergen_type: values.allergen_type, ...claim });
+      if (claim.source) await audit({ userId, event: "UPDATE", targetClass: "Allergy", targetId: old.id, oldData: sourceChange, newData: claim });
+    } else if (claim.source) {
+      await save(old, claim);
+      await audit({ userId, event: "UPDATE", targetClass: "Allergy", targetId: old.id, oldData: sourceChange, newData: claim });
     }
   }
   for (const old of existing) {
@@ -237,7 +249,7 @@ async function loadMedications(userId) {
     seen.add(norm(m.get("medication_name")));
     if (m.get("brand_name")) seen.add(norm(m.get("brand_name")));
   }
-  const rec = await findOne("MedicalRecord", { user_id: userId });
+  const rec = await oldestRow("MedicalRecord", userId);
   const data = rec ? rec.get("data") || {} : {};
   for (const field of ["prescriptions", "non_prescriptions"]) {
     for (const m of Array.isArray(data[field]) ? data[field] : []) {
@@ -250,15 +262,8 @@ async function loadMedications(userId) {
   return list.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-// GET /safety/allergies
-async function getAllergies(user) {
-  await syncAllergiesFromRecord(user.user_id);
-  const allergies = (await loadAllergies(user.user_id)).map((a) => ({ ...a, drug_class_names: (a.drug_classes || []).map((c) => className(ref, c)) }));
-  return { status: 200, allergies, count: allergies.length };
-}
-
-// GET /safety/alerts — re-check, save (keeping acknowledgements), return open ones first
-async function getAlerts(user) {
+// POST /safety/recheck — re-check, save (keeping acknowledgements); the page then reads the SafetyAlert rows itself
+async function recheck(user) {
   await syncAllergiesFromRecord(user.user_id);
   const allergies = await loadAllergies(user.user_id);
   const meds = await loadMedications(user.user_id);
@@ -279,14 +284,19 @@ async function getAlerts(user) {
   }
   // problems that no longer apply (medication stopped, allergy removed) go away
   await destroyAll(existing.filter((a) => !keep.has(a.get("alert_key"))));
-  const alerts = sortAlerts((await findAll("SafetyAlert", { user_id: user.user_id })).map(alertRow));
-  const open = alerts.filter((a) => !a.acknowledged_at);
   return {
-    status: 200, alerts, open_count: open.length, major_open_count: open.filter((a) => a.severity === "major").length,
-    medications_checked: meds.length, allergies_checked: allergies.length,
+    status: 200, medications_checked: meds.length, allergies_checked: allergies.length,
     disclaimer: "These checks cover common medicines only and do not replace a pharmacist's review.",
     reference: { version: R.REFERENCE_VERSION, note: R.WARNING_LIST_NOTE },
   };
+}
+
+// re-check, then every warning, open ones first (the PDF auto-fill, the C-CDA import, the seed)
+async function getAlerts(user) {
+  const { status, ...info } = await recheck(user);
+  const alerts = sortAlerts((await findAll("SafetyAlert", { user_id: user.user_id })).map(alertRow));
+  const open = alerts.filter((a) => !a.acknowledged_at);
+  return { status, alerts, open_count: open.length, major_open_count: open.filter((a) => a.severity === "major").length, ...info };
 }
 
 // POST /safety/check {medication_name, brand_name?} — nothing saved
@@ -309,20 +319,70 @@ async function check(body, user) {
     reference: { version: R.REFERENCE_VERSION, note: R.WARNING_LIST_NOTE } };
 }
 
-// POST /safety/alerts/:id/acknowledge
-async function acknowledge(id, body, user) {
-  if (!isId(id)) return { status: 400, error: "Invalid alert ID" };
-  const acknowledged = !body || body.acknowledged === undefined ? true : body.acknowledged;
-  if (typeof acknowledged !== "boolean") return { status: 400, error: "acknowledged must be true or false" };
-  const note = body && body.note != null ? String(body.note).trim() : "";
-  if (note.length > 500) return { status: 400, error: "note is too long (max 500)" };
-  const alert = await findOne("SafetyAlert", { objectId: id, user_id: user.user_id });
-  if (!alert) return { status: 404, error: "Warning not found" };
-  const before = alert.get("acknowledged_at") || null;
-  await save(alert, { acknowledged_at: acknowledged ? new Date() : null, acknowledged_note: acknowledged ? note || null : null });
-  await audit({ userId: user.user_id, event: acknowledged ? "ACKNOWLEDGE" : "UNACKNOWLEDGE", targetClass: "SafetyAlert", targetId: id,
-    oldData: { acknowledged_at: before }, newData: { acknowledged_at: alert.get("acknowledged_at") || null, note: note || null } });
-  return { status: 200, alert: alertRow(alert) };
-}
+// ---------- browser saves (access.js RULES.Allergy and RULES.SafetyAlert) ----------
+const FORM_SOURCE = "health_history_form";
+const BROWSER_SOURCE = "patient_entered";
+const FROM_FORM = "This allergy comes from your Health History form. Change or remove it there.";
+const SEVERITIES = ["mild", "moderate", "severe", "life_threatening"];
+const ALLERGY_STATUSES = ["active", "inactive"];
+const ALLERGY_BROWSER_FIELDS = ["allergen", "reaction", "severity", "status"];
+// the allergen as stored (trimmed)
+const allergenText = (v) => (typeof v === "string" ? v.trim() : "");
 
-module.exports = { syncAllergiesFromRecord, getAllergies, getAlerts, check, acknowledge };
+async function allergyProblem(body, { user, original }) {
+  if (original && original.get("source") === FORM_SOURCE) return FROM_FORM;
+  if (!original || "allergen" in body) {
+    const allergen = allergenText(body.allergen);
+    if (!allergen) return "Missing required field: allergen";
+    if (allergen.length > 200) return "allergen is too long (max 200)";
+    // one row per allergen (the form copy uses the same key), so the checks never warn twice
+    const dup = (await findAll("Allergy", { user_id: user.id, allergen_key: norm(allergen) }, { limit: 2 })).find((o) => !original || o.id !== original.id);
+    if (dup) return `You already listed an allergy to ${dup.get("allergen")}`;
+  }
+  if (body.reaction != null && body.reaction.trim().length > 500) return "reaction is too long (max 500)";
+  if (body.severity != null && !SEVERITIES.includes(body.severity)) return `severity must be one of: ${SEVERITIES.join(", ")}`;
+  if ("status" in body && !ALLERGY_STATUSES.includes(body.status)) return `status must be one of: ${ALLERGY_STATUSES.join(", ")}`;
+  return null;
+}
+// the server's part: allergen_key, allergen_type and drug_classes from the allergen; severity from the reaction when
+// none is given on a new row (as the form copy does)
+function allergyValues(body, { original }) {
+  const values = {};
+  if (!original || "allergen" in body) {
+    const allergen = allergenText(body.allergen);
+    values.allergen = allergen;
+    values.allergen_key = norm(allergen);
+    values.allergen_type = allergenType(ref, allergen);
+    values.drug_classes = [...classifyAllergen(ref, allergen).classes].sort();
+  }
+  if (!original || "reaction" in body) values.reaction = body.reaction == null ? null : body.reaction.trim() || null;
+  if ("severity" in body) values.severity = body.severity;
+  else if (!original) values.severity = reactionSeverity(values.reaction);
+  if ("status" in body) values.status = body.status;
+  return values;
+}
+const allergyDeleteProblem = (obj) => (obj.get("source") === FORM_SOURCE ? FROM_FORM : null);
+
+// SafetyAlert: the browser only acknowledges ("I've talked to my doctor") or takes that back. Sending acknowledged_at
+// (any date: the server stores its own time) acknowledges, with an optional acknowledged_note; clearing it takes the
+// acknowledgement back (the note is cleared too). The old POST /safety/alerts/:id/acknowledge rules.
+const ALERT_BROWSER_FIELDS = ["acknowledged_at", "acknowledged_note"];
+function alertProblem(body) {
+  if (!("acknowledged_at" in body)) return "acknowledged_note can only be saved with acknowledged_at";
+  if (body.acknowledged_at !== null && body.acknowledged_note != null && body.acknowledged_note.trim().length > 500) return "note is too long (max 500)";
+  return null;
+}
+function alertValues(body) {
+  if (body.acknowledged_at === null) return { acknowledged_at: null, acknowledged_note: null };
+  const note = body.acknowledged_note == null ? "" : body.acknowledged_note.trim();
+  return { acknowledged_at: new Date(), acknowledged_note: note || null };
+}
+const ALERT_DELETE_REFUSED = "warnings can't be removed; they go away when the problem no longer applies";
+const alertDeleteProblem = () => ALERT_DELETE_REFUSED;
+const alertAuditEvent = (obj) => (obj.get("acknowledged_at") ? "ACKNOWLEDGE" : "UNACKNOWLEDGE");
+
+module.exports = {
+  syncAllergiesFromRecord, getAlerts, recheck, check,
+  ALLERGY_BROWSER_FIELDS, allergyProblem, allergyValues, allergyDeleteProblem, allergyRow, BROWSER_SOURCE,
+  ALERT_BROWSER_FIELDS, alertProblem, alertValues, alertDeleteProblem, alertAuditEvent, alertRow,
+};

@@ -1,29 +1,42 @@
-// seed.js — the demo patient and demo doctor, full of MADE-UP data, for demos and testing.
+// seed.js — the demo patient, full of MADE-UP data, for demos and testing.
 //
 // Run it from the Back4app dashboard: API Console > Cloud Code Functions > "seedDemo"
 // (tick "Use Master Key"), or locally:  node Parse/local/seed-demo.js
 //
-// Everything here is fictional. Re-running it deletes the two demo accounts (and all their
-// data) and builds them again. Every item goes through the same route() code the website
-// calls, so pill counts, charts, lab flags and safety warnings are calculated exactly as
+// Everything here is fictional. Re-running it deletes the demo account (and all its
+// data) and builds it again; it also removes the demo doctor account older versions made. Items go through the same route() code the website
+// calls (medications, doses and refills call lib/medications.js, diary entries lib/diary.js, conditions lib/conditions.js, links lib/links.js, food entries lib/nutrition.js, lab results lib/labs.js, the disposal lib/disposal.js, the Health History form lib/records.js and the safety check lib/safety.js directly, because those routes are gone), so pill counts, charts, lab flags and safety warnings are calculated exactly as
 // they would be for a real patient.
 //
-// Logins it creates:
+// Login it creates (the only one: there are no doctor accounts):
 //   patient   demo.patient@example.com  /  DemoPatient123
-//   doctor    demo.doctor@example.com   /  DemoDoctor123   (physician; NPI shown in the result)
 
 const { route } = require("./router");
 const auth = require("./auth");
+const medications = require("./medications");
+const diary = require("./diary");
+const conditions = require("./conditions");
+const links = require("./links");
+const nutrition = require("./nutrition");
+const vitals = require("./vitals");
+const respiratory = require("./respiratory");
+const reminders = require("./reminders");
+const notifications = require("./notifications");
+const calendar = require("./calendar");
+const disposal = require("./disposal");
+const labs = require("./labs");
+const safety = require("./safety");
+const records = require("./records");
 const legal = require("./legal");
 const { M, findAll, findOne, destroyAll, save } = require("./db");
 const { SCHEMA } = require("./setup");
-const sec = require("./security");
 
 const PATIENT = { email: "demo.patient@example.com", name: "Maria Delgado", password: "DemoPatient123" };
 // The patient's made-up birth date, typed once: the Health History form uses PATIENT_DOB, the sample PDFs print PATIENT_DOB_TEXT
 const PATIENT_DOB = "1968-03-14";
 const PATIENT_DOB_TEXT = `${PATIENT_DOB.slice(5, 7)}/${PATIENT_DOB.slice(8, 10)}/${PATIENT_DOB.slice(0, 4)}`;
-const DOCTOR = { email: "demo.doctor@example.com", name: "Dr. Samuel Okafor", password: "DemoDoctor123", npi: "1234567893" };
+// older versions of this seed also made a demo doctor account; re-running removes it
+const OLD_DEMO_DOCTOR_EMAIL = "demo.doctor@example.com";
 
 // ---------- date helpers ----------
 const DAY = 24 * 60 * 60 * 1000;
@@ -261,7 +274,7 @@ async function seedDemo() {
   };
 
   await deleteAccount(PATIENT.email);
-  await deleteAccount(DOCTOR.email);
+  await deleteAccount(OLD_DEMO_DOCTOR_EMAIL);
   const p = await newAccount(PATIENT);
   const user = auth.asUser(p);
   const ctx = { user, sessionToken: null, ip: "seed", userAgent: "seedDemo" };
@@ -271,13 +284,13 @@ async function seedDemo() {
     if (!r || r.status >= 400) throw new Error(`${method} ${path}: ${r && r.error}`);
     return r;
   };
+  // medications have no api route (the website uses the Parse SDK, D-025): the same module, same checks
+  const ok = (what) => (r) => { if (!r || r.status >= 400) throw new Error(`${what}: ${r && r.error}`); return r; };
+  const addMed = (body) => medications.create(body, user).then(ok("add medication"));
+  const addRefill = (id, body) => medications.addRefill(id, body, user).then(ok("add refill"));
+  const logDose = (id, body) => medications.logDose(id, body, user).then(ok("log dose"));
   await save(new Parse.Object("MedicalRecord"), { user_id: user.user_id, data: {} });
-
-  // Each NPI can only be on one account: use the standard test NPI if it's free.
-  let npi = DOCTOR.npi;
-  for (let n = 1234567890; (await findOne("_User", { npi })) || !sec.isValidNpi(npi); n++) npi = String(n);
-  await newAccount(DOCTOR, { role: "physician", npi });
-  results.push(`✓ Accounts — patient + doctor (physician, NPI ${npi})`);
+  results.push("✓ Account — demo patient");
 
   // ---------- Health History form ----------
   const form = {
@@ -318,7 +331,8 @@ async function seedDemo() {
     social: { tobacco: "Former", alcohol: "Occasionally", notes: "Quit smoking in 2010. Walks 30 minutes 4 days a week. Works as an elementary school librarian." },
   };
   await section("Health History form", async () => {
-    await call("PUT", "/records", { data: form });
+    // the same save as the form (the website saves MedicalRecord itself), with the same allergy copy
+    await records.putRecord({ data: form }, user, ctx, { afterRecordSaved: (uid, d) => safety.syncAllergiesFromRecord(uid, d) }).then(ok("save the health history"));
     return "patient info, 5 conditions, 3 surgeries, 3 allergies, 5 vaccines";
   });
 
@@ -333,15 +347,15 @@ async function seedDemo() {
       { key: "allergy", condition_name: "Seasonal allergies", category: "allergy", status: "active", severity: "mild" },
     ];
     for (const { key, ...body } of list) {
-      const r = await call("POST", "/conditions", body);
-      conditionIds[key] = (r.condition || r).condition_id;
+      const r = await conditions.create(body, user).then(ok("add condition"));
+      conditionIds[key] = r.condition.condition_id;
     }
     if (conditionIds.diabetes) {
-      await call("POST", `/conditions/${conditionIds.diabetes}/notes`, { note_text: "A1C down to 7.1 after adding evening walks. Keep metformin the same.", note_type: "improvement" });
-      await call("POST", `/conditions/${conditionIds.diabetes}/targets`, { vital_type: "blood_glucose", target_min: 80, target_max: 130, set_by: "provider" });
+      await conditions.addNote(conditionIds.diabetes, { note_text: "A1C down to 7.1 after adding evening walks. Keep metformin the same.", note_type: "improvement" }, user).then(ok("add condition note"));
+      await conditions.setTarget(conditionIds.diabetes, { vital_type: "blood_glucose", target_min: 80, target_max: 130, set_by: "provider" }, user).then(ok("set target"));
     }
     if (conditionIds.bp) {
-      await call("POST", `/conditions/${conditionIds.bp}/targets`, { vital_type: "blood_pressure", target_max: 130, secondary_max: 80, set_by: "provider" });
+      await conditions.setTarget(conditionIds.bp, { vital_type: "blood_pressure", target_max: 130, secondary_max: 80, set_by: "provider" }, user).then(ok("set target"));
     }
     return `${Object.keys(conditionIds).length} conditions with notes and targets`;
   });
@@ -360,11 +374,11 @@ async function seedDemo() {
     let doses = 0;
     for (const { cond, perDay, ...body } of meds) {
       if (cond && conditionIds[cond]) body.condition_id = conditionIds[cond];
-      const r = await call("POST", "/medications", body);
+      const r = await addMed(body);
       const id = r.medication.medication_id;
       // a refill a few weeks ago
       if (body.status !== "discontinued" && body.medication_type === "prescription") {
-        await call("POST", `/medications/${id}/refills`, { quantity_added: 30, refill_date: ymd(daysAgo(18)), pharmacy_name: body.pharmacy_name });
+        await addRefill(id, { quantity_added: 30, refill_date: ymd(daysAgo(18)), pharmacy_name: body.pharmacy_name });
         // the refill added 30; set the count so it matches the list above after this week's doses
         const med = await findOne("Medication", { objectId: id });
         await save(med, { quantity_on_hand: body.quantity_on_hand + 7 * perDay });
@@ -376,13 +390,13 @@ async function seedDemo() {
           const when = daysAgo(day, h, 5 + Math.floor(rand() * 40));
           if (when > now) continue;
           const skipped = (day === 3 && h === 20) || (day === 5 && body.medication_name === "Atorvastatin");
-          await call("POST", `/medications/${id}/doses`, { dose_status: skipped ? "skipped" : "taken", taken_at: when.toISOString() });
+          await logDose(id, { dose_status: skipped ? "skipped" : "taken", taken_at: when.toISOString() });
           doses++;
         }
       }
       if (body.medication_name === "Ibuprofen") {
         for (const day of [1, 4, 6]) {
-          await call("POST", `/medications/${id}/doses`, { dose_status: "taken", taken_at: daysAgo(day, 18, 30).toISOString() });
+          await logDose(id, { dose_status: "taken", taken_at: daysAgo(day, 18, 30).toISOString() });
           doses++;
         }
       }
@@ -414,7 +428,8 @@ async function seedDemo() {
     add("hemoglobin_a1c", 7.1, daysAgo(4, 9, 0));
     let count = 0;
     for (let i = 0; i < pending.length; i += 20) {
-      const done = await Promise.all(pending.slice(i, i + 20).map((b) => route({ method: "POST", path: "/vitals", body: b, query: {} }, ctx)));
+      // vitals have no api route (the website uses the Parse SDK): the same module, same checks, same automatic BMI
+      const done = await Promise.all(pending.slice(i, i + 20).map((b) => vitals.create(b, user)));
       count += done.filter((r) => r.status < 400).length;
     }
     return `${count} readings over 4 months (blood pressure, heart rate, glucose, weight, O2, temperature, pain, A1C)`;
@@ -435,8 +450,8 @@ async function seedDemo() {
       [55, "general", "Flu shot", "Got the flu shot at the pharmacy. Arm sore for a day.", 2, "Good", false],
     ];
     for (const [ago, category, title, description, severity, mood, follow] of entries) {
-      await call("POST", "/diary-entries", { entry_date: ymd(daysAgo(ago)), category, title, description,
-        ...(severity ? { severity } : {}), mood, follow_up_needed: follow });
+      await diary.create({ entry_date: ymd(daysAgo(ago)), category, title, description,
+        ...(severity ? { severity } : {}), mood, follow_up_needed: follow }, user).then(ok("add diary entry"));
     }
     return `${entries.length} entries`;
   });
@@ -453,13 +468,13 @@ async function seedDemo() {
     ];
     for (const body of ev) {
       if (body.condition_id == null) delete body.condition_id;
-      await call("POST", "/calendar/events", body);
+      await calendar.create(body, user).then(ok("add event"));
     }
     // one repeating event: every other day, 30 times
     const { start, duration_minutes, ...repeating } = REPEATING_EVENT;
     const startAt = daysAhead(start.days, start.hour, start.minute);
-    await call("POST", "/calendar/events", { ...repeating, start_time: startAt.toISOString(),
-      end_time: new Date(startAt.getTime() + duration_minutes * 60 * 1000).toISOString() });
+    await calendar.create({ ...repeating, start_time: startAt.toISOString(),
+      end_time: new Date(startAt.getTime() + duration_minutes * 60 * 1000).toISOString() }, user).then(ok("add event"));
     return `${ev.length + 1} events (5 upcoming, 1 past, 1 repeating every other day)`;
   });
 
@@ -476,7 +491,7 @@ async function seedDemo() {
     let n = 0;
     for (let day = 0; day < 3; day++) {
       for (const [foodName, servingSize, servingUnit, calories, proteinG, carbsG, fatG, fiberG, sugarG, sodiumMg] of meals) {
-        const r = await call("POST", "/nutrition/log", { foodName, servingSize, servingUnit, calories, proteinG, carbsG, fatG, fiberG, sugarG, sodiumMg });
+        const r = await nutrition.log({ foodName, servingSize, servingUnit, calories, proteinG, carbsG, fatG, fiberG, sugarG, sodiumMg }, user).then(ok("add food entry"));
         n++;
         // spread the meals over the day (and back over 3 days)
         const row = await findOne("NutritionLog", { objectId: r.logId });
@@ -522,18 +537,18 @@ async function seedDemo() {
     });
     const reportId = up.report.report_id;
     // six months ago (worse) and this week (better), so trends show "improving"
-    await call("POST", "/labs/results", { collected_date: oldDate, results: [
+    await labs.createResults({ collected_date: oldDate, results: [
       { test_code: "total_cholesterol", value: 238 }, { test_code: "ldl", value: 158 }, { test_code: "hdl", value: 42 },
       { test_code: "triglycerides", value: 196 }, { test_code: "glucose", value: 142 }, { test_code: "a1c", value: 7.8 },
       { test_code: "potassium", value: 4.4 }, { test_code: "creatinine", value: 0.98 }, { test_code: "vitamin_d", value: 19 },
-    ] });
-    await call("POST", "/labs/results", { collected_date: newDate, report_id: reportId, results: [
+    ] }, user).then(ok("add lab results"));
+    await labs.createResults({ collected_date: newDate, report_id: reportId, results: [
       { test_code: "total_cholesterol", value: 212 }, { test_code: "ldl", value: 131 }, { test_code: "hdl", value: 46 },
       { test_code: "triglycerides", value: 168 }, { test_code: "glucose", value: 118 }, { test_code: "a1c", value: 7.1 },
       { test_code: "sodium", value: 139 }, { test_code: "potassium", value: 4.6 }, { test_code: "creatinine", value: 1.02 },
       { test_code: "egfr", value: 68 }, { test_code: "alt", value: 31 }, { test_code: "vitamin_d", value: 24 },
       { test_code: "tsh", value: 2.1 },
-    ] });
+    ] }, user).then(ok("add lab results"));
     return "1 PDF report + 22 results from 2 dates (6 out of range, most improving)";
   });
 
@@ -547,7 +562,7 @@ async function seedDemo() {
       { title: "Glucose meter app", url: "https://www.example.com/glucose-app", category: "device_app", notes: "Syncs my meter readings" },
       { title: "MotionWorks PT exercises", url: "https://www.example.com/motionworks", category: "provider", notes: "Home knee exercises" },
     ];
-    for (const body of list) await call("POST", "/links", body);
+    for (const body of list) await links.create(body, user).then(ok("add link"));
     return `${list.length} links`;
   });
 
@@ -564,22 +579,23 @@ async function seedDemo() {
   await section("Breathing devices", async () => {
     // APAP machine: 44 nights, and parts that are due or overdue
     const { start_ago, supplies_due, ...apap } = APAP_DEVICE;
-    const made = await call("POST", "/respiratory/devices", { ...apap, start_date: ymd(daysAgo(start_ago)) });
+    // breathing devices have no api route (the website uses the Parse SDK): the same module, same checks
+    const made = await respiratory.createDevice({ ...apap, start_date: ymd(daysAgo(start_ago)) }, user, ctx).then(ok("add device"));
     const apapId = made.device.device_id;
     for (let i = 0; i < APAP_NIGHTS.length; i += 11) {
       await Promise.all(APAP_NIGHTS.slice(i, i + 11).map(({ ago, ...night }) =>
-        call("POST", "/respiratory/logs", { device_id: apapId, log_date: ymd(daysAgo(ago)), ...night })));
+        respiratory.createLog({ device_id: apapId, log_date: ymd(daysAgo(ago)), ...night }, user, ctx).then(ok("add entry"))));
     }
     for (const due of supplies_due) {
       const part = made.supplies.find((s) => s.part_name === due.part_name);
       if (!part) throw new Error(`no "${due.part_name}" on the default parts list`);
-      await call("PUT", `/respiratory/supplies/${part.supply_id}`, { last_replaced: ymd(daysAgo(due.days_since)) });
+      await save(await new Parse.Query("DeviceSupply").get(part.supply_id, M), { last_replaced: ymd(daysAgo(due.days_since)) });
     }
     // peak flow meter with readings
     const { start_ago: pfStart, ...pf } = PEAK_FLOW_DEVICE;
-    const meter = await call("POST", "/respiratory/devices", { ...pf, start_date: ymd(daysAgo(pfStart)) });
+    const meter = await respiratory.createDevice({ ...pf, start_date: ymd(daysAgo(pfStart)) }, user, ctx).then(ok("add device"));
     for (const { ago, ...reading } of PEAK_FLOW_READINGS) {
-      await call("POST", "/respiratory/logs", { device_id: meter.device.device_id, log_date: ymd(daysAgo(ago)), ...reading });
+      await respiratory.createLog({ device_id: meter.device.device_id, log_date: ymd(daysAgo(ago)), ...reading }, user, ctx).then(ok("add entry"));
     }
     return `APAP with ${APAP_NIGHTS.length} nights and ${supplies_due.length} parts due, peak flow meter with ${PEAK_FLOW_READINGS.length} readings`;
   });
@@ -591,16 +607,16 @@ async function seedDemo() {
     ...(end_ago != null ? { end_date: ymd(daysAgo(end_ago)) } : {}),
   });
   await section("Leftover medicines", async () => {
-    for (const m of LEFTOVER_MEDS) await call("POST", "/medications", medBody(m));
-    const d = await call("GET", "/disposal/due");
+    for (const m of LEFTOVER_MEDS) await addMed(medBody(m));
+    const d = await disposal.due(user);
     return `${LEFTOVER_MEDS.length} stopped medicines still on hand (${d.medications.filter((x) => x.guidance.on_flush_list).length} on the flush list)`;
   });
   await section("Past disposal", async () => {
-    const r = await call("POST", "/medications", medBody(PAST_DISPOSAL.medication));
-    await call("POST", "/disposal/logs", {
+    const r = await addMed(medBody(PAST_DISPOSAL.medication));
+    await disposal.createLog({
       medication_id: r.medication.medication_id, quantity: PAST_DISPOSAL.quantity, method: PAST_DISPOSAL.method,
       location: PAST_DISPOSAL.location, notes: PAST_DISPOSAL.notes, disposed_date: ymd(daysAgo(PAST_DISPOSAL.ago)),
-    });
+    }, user, ctx).then(ok("add disposal"));
     return `${PAST_DISPOSAL.medication.medication_name} disposed ${PAST_DISPOSAL.ago} days ago`;
   });
 
@@ -622,7 +638,7 @@ async function seedDemo() {
         if (link.kind === "medication") medIdByName[link.name] = body.linked_id;
       }
       if (ahead) body.remind_at = daysAhead(ahead.days, ahead.hour, ahead.minute).toISOString();
-      const res = await call("POST", "/reminders", body);
+      const res = await reminders.create(body, user, ctx).then(ok("add reminder"));
       reminderIds[r.title] = res.reminder.reminder_id;
     }
     const kinds = new Set(DEMO_REMINDERS.map((r) => r.reminder_type));
@@ -643,13 +659,14 @@ async function seedDemo() {
       n++;
     }
     // a real sweep adds the automatic alerts for what is above: low stock, parts due, leftover medicines
-    const inbox = await call("GET", "/notifications");
-    return `${n} reminder notifications + automatic alerts; ${inbox.unread} unread`;
+    await notifications.runDue(user.user_id);
+    const unread = await new Parse.Query("Notification").equalTo("user_id", user.user_id).doesNotExist("read_at").doesNotExist("dismissed_at").count(M);
+    return `${n} reminder notifications + automatic alerts; ${unread} unread`;
   });
 
   // ---------- safety check (allergies x medications) ----------
   await section("Medication safety check", async () => {
-    const r = await call("GET", "/safety/alerts");
+    const r = await safety.getAlerts(user);
     return `${r.alerts.length} warning(s) found`;
   });
 
@@ -657,16 +674,14 @@ async function seedDemo() {
   const codes = {};
   await section("Share codes", async () => {
     const sections = ["record", "medications", "vitals", "diary"];
-    codes.provider = (await call("POST", "/share", { audience: "provider", sections, label: "Dr. Okafor – check-up", expiresHours: 168 })).shareCode;
-    codes.family = (await call("POST", "/share", { audience: "family", sections, label: "Carlos", expiresHours: 168 })).shareCode;
-    return "1 provider code + 1 family code (7 days)";
+    codes.family = (await call("POST", "/share", { sections, label: "Carlos", expiresHours: 168 })).shareCode;
+    return "1 sharing code (7 days)";
   });
 
   return {
     results,
     logins: {
       patient: `${PATIENT.email} / ${PATIENT.password}`,
-      doctor: `${DOCTOR.email} / ${DOCTOR.password} (NPI ${npi})`,
     },
     shareCodes: codes,
   };

@@ -1,13 +1,10 @@
-// notifications.js — the notification inbox, automatic alerts, and firing reminders (Task 2.7).
-//   GET    /notifications              the inbox (runs runDue first), newest first, dismissed ones hidden
-//   GET    /notifications/count        unread count (runs runDue first)
-//   POST   /notifications/read-all     mark every notification read
-//   DELETE /notifications?read=true    clear the read ones (sets dismissed_at; rows are kept)
-//   POST   /notifications/:id/read     mark one read
-//   DELETE /notifications/:id          dismiss one (sets dismissed_at; the row is kept)
-//   GET    /notifications/settings     the automatic alert and email settings
-//   PUT    /notifications/settings     change them
-// Routes are wired in router.js (Task 2.8). runAll() is the background job; purgeOld() removes old read rows.
+// notifications.js — automatic alerts and firing reminders (Task 2.7): the server side of the notification inbox.
+//   POST   /notifications/sweep        fire the caller's due reminders and make their alerts (the website calls it
+//                                     before it reads the inbox or the unread count, as the old inbox routes did)
+// The inbox itself (list, count, mark read, read all, clear read, dismiss) and the alert settings are read and written
+// by the website with the Parse SDK (Vite/src/data/notifications.ts), guarded by access.js RULES.Notification and
+// RULES.NotificationPrefs, whose rules are here (noteProblem/noteValues, prefsProblem/dedupePrefs).
+// runAll() is the background job; purgeOld() removes old read rows. Only the server creates Notification rows.
 // Classes: Notification, NotificationPrefs (Reminder, Medication, CalendarEvent, RespiratoryDevice, DeviceSupply are read)
 //
 // runDue(userId) fires the user's due reminders (one notification even when several times were missed) and then
@@ -18,7 +15,7 @@
 // with no health details. A reminder emails when its "Also email me" (email_me) is on; automatic alerts email when
 // NotificationPrefs.email is on. Without SMTP settings no email is sent and nothing fails.
 
-const { M, isId, toRow, findAll, findOne, getOwned, save, create, destroyAll, audit, fail } = require("./db");
+const { M, toRow, findAll, findOne, keepOldest, save, create, destroyAll, audit } = require("./db");
 const sec = require("./security");
 const { nextOccurrence, reminderRow } = require("./reminders");
 const { medRow, withInventoryInfo } = require("./medications");
@@ -31,7 +28,6 @@ const APPOINTMENT_WINDOW_MS = 24 * HOUR_MS;    // an appointment, lab or procedu
 const SUPPLY_DUE_DAYS = 3;                     // a device part due within 3 days (or overdue)
 const PURGE_AFTER_DAYS = 90;                   // read notifications older than this are removed by the job
 const PURGE_BATCH = 1000;
-const LIST_LIMIT = 100;
 
 const PREF_KEYS = ["low_stock", "appointments", "supplies", "disposal", "email"];
 const DEFAULT_PREFS = { low_stock: true, appointments: true, supplies: true, disposal: true, email: false };
@@ -71,7 +67,8 @@ function weekStart(date) {
 
 // --- settings ---------------------------------------------------------------------------------
 
-const prefsRow = (userId) => findOne("NotificationPrefs", { user_id: userId });
+// the oldest row (one per user; see dedupePrefs)
+const prefsRow = (userId) => findOne("NotificationPrefs", { user_id: userId }, { ascending: "createdAt" });
 
 // The stored settings over the defaults (a missing or non-boolean value falls back to its default)
 function prefsOf(row) {
@@ -80,33 +77,24 @@ function prefsOf(row) {
   return out;
 }
 
-// GET /notifications/settings
-async function getSettings(user) {
-  return { status: 200, settings: prefsOf(await prefsRow(user.user_id)) };
+// The website reads and changes its NotificationPrefs row with the Parse SDK (Vite/src/data/notifications.ts reads it,
+// or uses DEFAULT_PREFS when there is none, and creates it on the first change). access.js RULES.NotificationPrefs:
+// booleans only, one row per user. A second create is refused (PREFS_EXIST); two creates at the same moment can both
+// pass that check, so after every browser create the extra rows are removed again, keeping the oldest (dedupePrefs).
+const PREFS_EXIST = "Your alert settings are already saved";
+const PREF_FIELDS = ["user_id", ...PREF_KEYS];
+const prefsAuditRow = (o) => toRow(o, "prefs_id", PREF_FIELDS);
+
+async function prefsProblem(body, { user, original }) {
+  for (const [k, v] of Object.entries(body)) if (v === null) return `${PREF_LABELS[k]} must be true or false`;
+  if (!original && await prefsRow(user.id)) return PREFS_EXIST;
+  return null;
 }
 
-// PUT /notifications/settings {low_stock?, appointments?, supplies?, disposal?, email?} — only the keys sent change
-async function putSettings(body, user) {
-  if (!body || typeof body !== "object" || Array.isArray(body)) return fail(400, "Missing settings");
-  const changes = {};
-  for (const k of PREF_KEYS) {
-    if (!Object.prototype.hasOwnProperty.call(body, k)) continue;
-    if (typeof body[k] !== "boolean") return fail(400, `${PREF_LABELS[k]} must be true or false`);
-    changes[k] = body[k];
-  }
-  if (!Object.keys(changes).length) return fail(400, "No settings to change");
-  const row = await prefsRow(user.user_id);
-  if (row) {
-    const oldData = prefsOf(row);
-    await save(row, changes);
-    const settings = prefsOf(row);
-    await audit({ userId: user.user_id, event: "UPDATE", targetClass: "NotificationPrefs", targetId: row.id, oldData, newData: settings });
-    return { status: 200, message: "Settings saved", settings };
-  }
-  const created = await create("NotificationPrefs", { user_id: user.user_id, ...DEFAULT_PREFS, ...changes });
-  const settings = prefsOf(created);
-  await audit({ userId: user.user_id, event: "INSERT", targetClass: "NotificationPrefs", targetId: created.id, newData: settings });
-  return { status: 200, message: "Settings saved", settings };
+// afterSave of a browser create: one row per user, the oldest wins (the same answer whichever save runs this)
+async function dedupePrefs(obj, { original, ip }) {
+  if (original) return;
+  await keepOldest("NotificationPrefs", obj.get("user_id"), { ip, row: prefsAuditRow });
 }
 
 // --- firing reminders -------------------------------------------------------------------------
@@ -367,88 +355,44 @@ async function purgeOld(now = new Date()) {
 }
 
 // --- the inbox --------------------------------------------------------------------------------
+// The website reads its notifications with the Parse SDK (Vite/src/data/notifications.ts: the list, the unread count,
+// mark read, mark all read, clear read, dismiss). access.js RULES.Notification: the browser may never create one (only
+// this file and emergency.js make them, with the master key), and an edit may only set read_at / dismissed_at, to the
+// server's time (dismissing also marks it read, as the old route did). Every other field stays as the server wrote it.
 
-const visible = async (userId) => (await findAll("Notification", { user_id: userId }, { descending: "createdAt" }))
-  .filter((n) => !n.get("dismissed_at"));
-
-// GET /notifications
-async function list(user) {
+// POST /notifications/sweep — what the old inbox and count routes did first: fire the caller's due reminders and make
+// their automatic alerts (the job only covers people with an active reminder or alert emails on). Never fails.
+async function sweep(user) {
   await runDueQuietly(user.user_id);
-  const rows = await visible(user.user_id);
-  return {
-    status: 200,
-    notifications: rows.slice(0, LIST_LIMIT).map(noteRow),
-    unread: rows.filter((n) => !n.get("read_at")).length,
-  };
+  return { status: 200 };
 }
 
-// GET /notifications/count — unread, not dismissed
-async function count(user) {
-  await runDueQuietly(user.user_id);
-  const rows = await visible(user.user_id);
-  return { status: 200, count: rows.filter((n) => !n.get("read_at")).length };
+const NOTE_BROWSER_FIELDS = ["read_at", "dismissed_at"];
+
+// The browser never removes a notification: the row keeps its dedupe_key, so the same alert is not made again.
+// The bell dismisses instead (dismissed_at; the inbox hides dismissed rows). Only purgeOld (master key) removes them.
+const NOTE_DELETE_REFUSED = "notifications can't be removed; dismiss them instead";
+const noteDeleteProblem = () => NOTE_DELETE_REFUSED;
+
+function noteProblem(body) {
+  for (const [k, v] of Object.entries(body)) if (v === null) return `${k} can't be cleared`;
+  return null;
 }
 
-// Sets `values` on each row and audits each change with its old and new data
-async function updateMany(user, rows, values, action) {
-  for (const n of rows) {
-    const oldData = noteRow(n);
-    await save(n, values);
-    await audit({ userId: user.user_id, event: "UPDATE", targetClass: "Notification", targetId: n.id, oldData, newData: noteRow(n),
-      detail: { action, count: rows.length } });
+// the server's time, and a time already stored is kept (the old routes only set them once)
+function noteValues(body, { original }) {
+  const now = new Date();
+  const values = {};
+  if ("read_at" in body) values.read_at = original.get("read_at") || now;
+  if ("dismissed_at" in body) {
+    values.dismissed_at = original.get("dismissed_at") || now;
+    values.read_at = original.get("read_at") || values.read_at || now;
   }
-  return rows.length;
-}
-
-// POST /notifications/read-all
-async function readAll(user) {
-  const rows = (await visible(user.user_id)).filter((n) => !n.get("read_at"));
-  const n = await updateMany(user, rows, { read_at: new Date() }, "read_all");
-  return { status: 200, message: "All marked read", updated: n };
-}
-
-// DELETE /notifications?read=true — clears read notifications from the inbox (dismissed, not deleted)
-async function clearRead(user) {
-  const rows = (await visible(user.user_id)).filter((n) => n.get("read_at"));
-  const n = await updateMany(user, rows, { dismissed_at: new Date() }, "clear_read");
-  return { status: 200, message: "Read notifications cleared", cleared: n };
-}
-
-async function ownedNote(id, user) {
-  if (!isId(id)) return { res: fail(400, "Invalid notification ID") };
-  const note = await getOwned("Notification", id, user.user_id);
-  if (!note) return { res: fail(404, "Notification not found") };
-  return { note };
-}
-
-// POST /notifications/:id/read
-async function markRead(id, user) {
-  const { note, res } = await ownedNote(id, user);
-  if (res) return res;
-  if (!note.get("read_at")) {
-    const oldData = noteRow(note);
-    await save(note, { read_at: new Date() });
-    await audit({ userId: user.user_id, event: "UPDATE", targetClass: "Notification", targetId: note.id, oldData, newData: noteRow(note) });
-  }
-  return { status: 200, message: "Marked read", notification: noteRow(note) };
-}
-
-// DELETE /notifications/:id — sets dismissed_at and keeps the row (its dedupe_key keeps the alert from coming back).
-// A dismissed notification also counts as read, so purgeOld removes it in time.
-async function dismiss(id, user) {
-  const { note, res } = await ownedNote(id, user);
-  if (res) return res;
-  if (!note.get("dismissed_at")) {
-    const oldData = noteRow(note);
-    const now = new Date();
-    await save(note, { dismissed_at: now, read_at: note.get("read_at") || now });
-    await audit({ userId: user.user_id, event: "UPDATE", targetClass: "Notification", targetId: note.id, oldData, newData: noteRow(note) });
-  }
-  return { status: 200, message: "Notification dismissed" };
+  return values;
 }
 
 module.exports = {
-  runDue, runAll, purgeOld,
-  list, count, readAll, clearRead, markRead, dismiss, getSettings, putSettings,
-  DEFAULT_PREFS, EMAIL_SUBJECT, EMAIL_TEXT, noteRow,
+  runDue, runAll, purgeOld, sweep,
+  noteProblem, noteValues, noteDeleteProblem, prefsProblem, dedupePrefs,
+  DEFAULT_PREFS, PREF_KEYS, NOTE_BROWSER_FIELDS, EMAIL_SUBJECT, EMAIL_TEXT, noteRow, prefsAuditRow,
 };

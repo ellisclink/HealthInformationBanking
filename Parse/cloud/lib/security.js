@@ -1,4 +1,4 @@
-// security.js — rate limits, code hashing, encryption, NPI check, email.
+// security.js — rate limits, code hashing, encryption, email.
 const crypto = require("crypto");
 const { M, findAll, create, destroyAll } = require("./db");
 
@@ -115,20 +115,6 @@ function decrypt(key, blob) {
   return Buffer.concat([decipher.update(blob.subarray(32)), decipher.final()]);
 }
 
-// ---------- NPI (National Provider Identifier) check digit ----------
-// Luhn over "80840" + the first 9 digits must give the 10th digit.
-function isValidNpi(npi) {
-  if (typeof npi !== "string" || !/^\d{10}$/.test(npi)) return false;
-  const digits = ("80840" + npi.slice(0, 9)).split("").map(Number);
-  let sum = 0;
-  for (let i = digits.length - 1, double = true; i >= 0; i--, double = !double) {
-    let d = digits[i];
-    if (double) { d *= 2; if (d > 9) d -= 9; }
-    sum += d;
-  }
-  return (10 - (sum % 10)) % 10 === Number(npi[9]);
-}
-
 // ---------- email ----------
 // Set SMTP_USER + SMTP_PASS (a Gmail app password works) in the Back4app environment
 // variables to send real emails.
@@ -170,5 +156,5 @@ const showCodes = () => DEV_CODES && process.env.MIB_SHOW_CODES === "true";
 module.exports = {
   blocked, hit, take, refund, resetLimit, minutesLeft,
   new2faCode, newResetCode, sha256, hashCode, checkCode, newShareCode,
-  fileKey, keyIsInvalid, uploadBlock, KEY_INVALID, encrypt, decrypt, isValidNpi, sendEmail, showCodes, DEV_MODE,
+  fileKey, keyIsInvalid, uploadBlock, KEY_INVALID, encrypt, decrypt, sendEmail, showCodes, DEV_MODE,
 };

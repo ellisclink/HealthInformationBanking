@@ -1,17 +1,13 @@
-// vitals.js — Vital signs logging & charts (Tasks 3.1 / 3.2), on Parse.
-//   GET    /vitals/types        supported types + reference ranges
-//   GET    /vitals              list readings (type, startDate, endDate, limit)
-//   GET    /vitals/:id          one reading
-//   POST   /vitals              log a reading
-//   PUT    /vitals/:id          correct a reading
-//   DELETE /vitals/:id          delete a reading
-//   GET    /vitals/summary      latest reading per type + in/out of range
-//   GET    /vitals/trends       min/max/avg per day|week|month over a window
-//   GET    /vitals/quick-look   week|month|year|all chart series + today's value (dashboard)
-// Class: VitalReading. The chart buckets used to be a rollup table; they're now computed
-// from the readings on request (a patient has hundreds, not millions).
+// vitals.js — Vital signs (Tasks 3.1 / 3.2), on Parse. Class: VitalReading
+//   The Vital Signs page reads and saves VitalReading with the Parse SDK (Vite/src/data/vitals.ts: list, one reading,
+//   summary, trends, quick-look, add / edit / delete; the vital types are in Vite/src/data/vitalTypes.ts). The owner-only
+//   rules in access.js (RULES.VitalReading) use validate/clean/row and the BMI hooks from here. There is no /vitals api
+//   route any more.
+//   Still used on the server (master key): create (autofill, the CCDA import, seed), list (the CCDA import), summary
+//   (share codes), and the automatic BMI: a weight or height reading makes / updates / removes a calculated
+//   BMI reading (source "calculated"), whoever saved it.
 
-const { M, isId, isDate, isDateTime, toRow, findAll, findOne, getOwned, save, create, audit, param } = require("./db");
+const { M, isId, isDate, isDateTime, toRow, findAll, oldestRow, getOwned, save, create, audit, param } = require("./db");
 const { VITAL_TYPES } = require("./reference");
 
 const FIELDS = ["user_id", "vital_type", "value_numeric", "value_secondary", "unit", "measured_at", "measurement_context",
@@ -75,7 +71,7 @@ function bmiCategory(bmi, age) {
 }
 
 async function dobOf(userId) {
-  const rec = await findOne("MedicalRecord", { user_id: userId });
+  const rec = await oldestRow("MedicalRecord", userId);
   const data = rec && rec.get("data");
   if (!data || typeof data !== "object") return null;
   const dob = data.patient && typeof data.patient === "object" && data.patient.dob ? data.patient.dob : data.dob;
@@ -190,28 +186,13 @@ function evaluate(reading, type, target) {
   return { status: above ? "above_range" : below ? "below_range" : "in_range", range };
 }
 
-function describeAge(seconds) {
-  if (seconds < 90) return "just now";
-  const m = Math.round(seconds / 60);
-  if (m < 60) return `${m} minute${m === 1 ? "" : "s"} ago`;
-  const h = Math.round(m / 60);
-  if (h < 24) return `${h} hour${h === 1 ? "" : "s"} ago`;
-  const d = Math.round(h / 24);
-  if (d < 30) return `${d} day${d === 1 ? "" : "s"} ago`;
-  const mo = Math.round(d / 30);
-  if (mo < 12) return `${mo} month${mo === 1 ? "" : "s"} ago`;
-  const y = (d / 365).toFixed(1);
-  return `${y} year${y === "1.0" ? "" : "s"} ago`;
-}
-
-const types = () => ({ status: 200, types: VITAL_TYPES.map(({ sort_order, ...t }) => t) });
-
 async function readings(userId, vitalType) {
   const rows = (await findAll("VitalReading", vitalType ? { user_id: userId, vital_type: vitalType } : { user_id: userId })).map(row);
   return rows.sort((a, b) => b.measured_at.localeCompare(a.measured_at));
 }
 
-// GET /vitals
+// the caller's readings, newest first (the CCDA import uses it to skip readings it already has; the website has its
+// own copy in Vite/src/data/vitals.ts)
 async function list(query, user) {
   const vitalType = param(query, "type"), startDate = param(query, "startDate"), endDate = param(query, "endDate");
   const rawLimit = parseInt(param(query, "limit"), 10);
@@ -229,127 +210,132 @@ async function list(query, user) {
   return { status: 200, readings: rows, count: rows.length };
 }
 
-async function getById(id, user) {
-  if (!isId(id)) return { status: 400, error: "Invalid vital log ID" };
-  const r = await getOwned("VitalReading", id, user.user_id);
-  if (!r) return { status: 404, error: "Reading not found" };
-  const data = row(r);
-  if (data.vital_type === "bmi") data.bmi_info = bmiInfoFor(data, await dobOf(user.user_id));
-  return { status: 200, reading: data };
-}
+const TEXT_MAX = 1000;
+const FUTURE_LIMIT_MS = 60 * 1000;   // a clock a little ahead is fine
+const blank = (v) => v === undefined || v === null;
 
 function checkOptional(body) {
   if (body.measurement_context && !VALID_CONTEXTS.includes(body.measurement_context)) return `Invalid measurement_context. Must be one of: ${VALID_CONTEXTS.join(", ")}`;
   if (body.body_position && !VALID_POSITIONS.includes(body.body_position)) return `Invalid body_position. Must be one of: ${VALID_POSITIONS.join(", ")}`;
   if (body.source && !VALID_SOURCES.includes(body.source)) return `Invalid source. Must be one of: ${VALID_SOURCES.join(", ")}`;
-  for (const f of ["notes", "device_name", "unit"]) if (body[f] != null && String(body[f]).length > 1000) return `${f} is too long`;
+  for (const f of ["notes", "device_name", "unit"]) if (body[f] != null && String(body[f]).length > TEXT_MAX) return `${f} is too long`;
   return null;
 }
-function checkWhen(value) {
-  if (!value) return { at: null };
-  const parsed = new Date(value);
-  if (isNaN(parsed.getTime())) return { error: "measured_at is not a valid date" };
-  if (parsed.getTime() > Date.now() + 60 * 1000) return { error: "measured_at cannot be in the future" };
-  return { at: parsed };
+
+// Field rules for a reading (the old POST /vitals and PUT /vitals/:id rules). body: the fields sent, already typed
+// (numbers are numbers, measured_at is a Date, a removed field is null); original: the stored row on an edit, else null.
+// An edit is checked against the reading as it will be stored. Returns an error message or null.
+// Used by createVital() below and by access.js (RULES.VitalReading: the browser saves VitalReading directly).
+function validate(body, original) {
+  if (!original) {
+    if (!body.vital_type || blank(body.value_numeric)) return "Missing required fields: vital_type, value_numeric";
+  } else {
+    if ("vital_type" in body) return "vital_type cannot be changed; delete this reading and log a new one";
+    if (original.get("source") === BMI_SOURCE) return "A calculated BMI cannot be edited. Change the weight or height instead.";
+    if ("source" in body) return "source cannot be changed";
+    if ("value_numeric" in body && blank(body.value_numeric)) return "value_numeric can't be cleared";
+    if ("measured_at" in body && blank(body.measured_at)) return "measured_at can't be cleared";
+  }
+  const vitalType = original ? original.get("vital_type") : body.vital_type;
+  const type = typeOf(vitalType);
+  if (!type) return `Unknown vital_type: ${vitalType}`;
+  const merged = (k) => (k in body ? body[k] : original ? original.get(k) ?? null : null);
+  const value = merged("value_numeric"), secondary = merged("value_secondary");
+  if (typeof value !== "number" || !Number.isFinite(value)) return "value_numeric must be a number";
+  if (!blank(secondary) && (typeof secondary !== "number" || !Number.isFinite(secondary))) return "value_secondary must be a number";
+  if (type.is_dual_value) {
+    if (blank(secondary)) return `${type.display_name} requires value_secondary (${type.secondary_label})`;
+    if (secondary >= value) return `${type.secondary_label} must be lower than ${type.value_label}`;
+  } else if (!blank(secondary)) return `${type.display_name} does not take a second value`;
+  const b = PLAUSIBLE_BOUNDS[vitalType];
+  if (b && (value < b.min || value > b.max)) {
+    return `${type.display_name} reading of ${value} ${type.default_unit} is outside the recordable range (${b.min}–${b.max}). Check the value and try again.`;
+  }
+  if (!blank(secondary) && b && b.secondaryMin !== undefined && (secondary < b.secondaryMin || secondary > b.secondaryMax)) {
+    return `${type.secondary_label} reading of ${secondary} is outside the recordable range (${b.secondaryMin}–${b.secondaryMax}).`;
+  }
+  const optErr = checkOptional(body);
+  if (optErr) return optErr;
+  const at = body.measured_at;
+  if (!blank(at)) {
+    if (!(at instanceof Date) || isNaN(at.getTime())) return "measured_at is not a valid date";
+    if (at.getTime() > Date.now() + FUTURE_LIMIT_MS) return "measured_at cannot be in the future";
+  }
+  return null;
 }
 
-// POST /vitals
+// The values to store (after validate): text trimmed (blank = cleared). The server fills in, never the browser:
+// unit = the type's default unit when none is given (also when an edit clears it), measured_at = now and
+// source = "manual" when not given. source "calculated" and source_reading_ids are only ever set by the BMI code here.
+function clean(body, original) {
+  const out = {};
+  for (const [f, v] of Object.entries(body)) {
+    if (v === undefined) continue;
+    out[f] = typeof v === "string" ? v.trim() || null : v;
+  }
+  const type = typeOf(original ? original.get("vital_type") : body.vital_type);
+  if (!original) {
+    if (!type.is_dual_value) out.value_secondary = null;
+    out.unit = out.unit || type.default_unit;
+    out.measured_at = out.measured_at || new Date();
+    out.source = out.source || "manual";
+  } else if ("unit" in out && !out.unit) out.unit = type.default_unit;
+  return out;
+}
+
+const CREATE_FIELDS = ["vital_type", "value_numeric", "value_secondary", "unit", "measured_at", "measurement_context", "body_position",
+  "device_name", "source", "condition_id", "notes"];
+const NUMBER_FIELDS = ["value_numeric", "value_secondary"];
+
+// A reading made by the server (autofill, the CCDA import, seed; the website saves through the Parse SDK). The body is
+// loose like the old POST /vitals: numbers may come as text and measured_at as an ISO string; "" counts as not sent.
 async function createVital(body, user) {
   if (!body || !body.vital_type || body.value_numeric === undefined || body.value_numeric === null) {
     return { status: 400, error: "Missing required fields: vital_type, value_numeric" };
   }
-  const type = typeOf(body.vital_type);
-  if (!type) return { status: 400, error: `Unknown vital_type: ${body.vital_type}` };
-  const value = Number(body.value_numeric);
-  if (!Number.isFinite(value)) return { status: 400, error: "value_numeric must be a number" };
-  let secondary = null;
-  if (type.is_dual_value) {
-    if (body.value_secondary === undefined || body.value_secondary === null) return { status: 400, error: `${type.display_name} requires value_secondary (${type.secondary_label})` };
-    secondary = Number(body.value_secondary);
-    if (!Number.isFinite(secondary)) return { status: 400, error: "value_secondary must be a number" };
-    if (secondary >= value) return { status: 400, error: `${type.secondary_label} must be lower than ${type.value_label}` };
-  } else if (body.value_secondary !== undefined && body.value_secondary !== null) {
-    return { status: 400, error: `${type.display_name} does not take a second value` };
+  const values = {};
+  for (const f of CREATE_FIELDS) if (body[f] !== undefined && body[f] !== null && body[f] !== "") values[f] = body[f];
+  if (!typeOf(values.vital_type)) return { status: 400, error: `Unknown vital_type: ${values.vital_type}` };
+  for (const f of CREATE_FIELDS) {
+    if (values[f] === undefined) continue;
+    if (NUMBER_FIELDS.includes(f)) {
+      const n = Number(values[f]);
+      if (!Number.isFinite(n)) return { status: 400, error: `${f} must be a number` };
+      values[f] = n;
+    } else if (f === "measured_at") values[f] = new Date(values[f]);
+    else values[f] = String(values[f]);
   }
-  const b = PLAUSIBLE_BOUNDS[body.vital_type];
-  if (b && (value < b.min || value > b.max)) {
-    return { status: 400, error: `${type.display_name} reading of ${value} ${type.default_unit} is outside the recordable range (${b.min}–${b.max}). Check the value and try again.` };
+  const problem = validate(values, null);
+  if (problem) return { status: 400, error: problem };
+  if (values.condition_id !== undefined) {
+    if (!isId(values.condition_id)) return { status: 400, error: "Invalid condition_id" };
+    if (!(await getOwned("Condition", values.condition_id, user.user_id))) return { status: 404, error: "Condition not found" };
   }
-  if (secondary !== null && b && b.secondaryMin !== undefined && (secondary < b.secondaryMin || secondary > b.secondaryMax)) {
-    return { status: 400, error: `${type.secondary_label} reading of ${secondary} is outside the recordable range (${b.secondaryMin}–${b.secondaryMax}).` };
-  }
-  const optErr = checkOptional(body);
-  if (optErr) return { status: 400, error: optErr };
-  const when = checkWhen(body.measured_at);
-  if (when.error) return { status: 400, error: when.error };
-  if (body.condition_id != null) {
-    if (!isId(String(body.condition_id))) return { status: 400, error: "Invalid condition_id" };
-    if (!(await getOwned("Condition", String(body.condition_id), user.user_id))) return { status: 404, error: "Condition not found" };
-  }
-  const reading = await create("VitalReading", {
-    user_id: user.user_id, vital_type: body.vital_type, value_numeric: value, value_secondary: secondary,
-    unit: body.unit || type.default_unit, measured_at: when.at || new Date(),
-    measurement_context: body.measurement_context || null, body_position: body.body_position || null,
-    device_name: body.device_name || null, source: body.source || "manual",
-    condition_id: body.condition_id != null ? String(body.condition_id) : null, notes: body.notes || null,
-  });
+  const reading = await create("VitalReading", { ...clean(values, null), user_id: user.user_id });
   const data = row(reading);
   await audit({ userId: user.user_id, event: "INSERT", targetClass: "VitalReading", targetId: reading.id, newData: data });
-  const out = { status: 201, message: "Vital sign recorded", reading: data, evaluation: evaluate(data, type, await activeTarget(user.user_id, body.vital_type)) };
+  const out = { status: 201, message: "Vital sign recorded", reading: data,
+    evaluation: evaluate(data, typeOf(data.vital_type), await activeTarget(user.user_id, data.vital_type)) };
   const bmi = await bmiAfterSave(user, data, { isNew: true });
   if (bmi) out.bmi = bmi;
   return out;
 }
 
-// PUT /vitals/:id
-async function update(id, body, user) {
-  if (!isId(id)) return { status: 400, error: "Invalid vital log ID" };
-  if (!body || Object.keys(body).length === 0) return { status: 400, error: "No fields to update" };
-  if (body.vital_type) return { status: 400, error: "vital_type cannot be changed; delete this reading and log a new one" };
-  const optErr = checkOptional(body);
-  if (optErr) return { status: 400, error: optErr };
-  const r = await getOwned("VitalReading", id, user.user_id);
-  if (!r) return { status: 404, error: "Reading not found" };
-  if (r.get("source") === BMI_SOURCE) return { status: 400, error: "A calculated BMI cannot be edited. Change the weight or height instead." };
-  const oldData = row(r);
-  const type = typeOf(oldData.vital_type);
-  const value = body.value_numeric != null ? Number(body.value_numeric) : Number(oldData.value_numeric);
-  if (!Number.isFinite(value)) return { status: 400, error: "value_numeric must be a number" };
-  const secondary = body.value_secondary !== undefined ? (body.value_secondary === null ? null : Number(body.value_secondary)) : oldData.value_secondary;
-  if (type.is_dual_value) {
-    if (secondary === null || !Number.isFinite(secondary)) return { status: 400, error: `${type.display_name} requires value_secondary` };
-    if (secondary >= value) return { status: 400, error: `${type.secondary_label} must be lower than ${type.value_label}` };
-  } else if (secondary !== null) return { status: 400, error: `${type.display_name} does not take a second value` };
-  const b = PLAUSIBLE_BOUNDS[oldData.vital_type];
-  if (b && (value < b.min || value > b.max)) return { status: 400, error: `${type.display_name} reading of ${value} is outside the recordable range (${b.min}–${b.max}).` };
-  const when = checkWhen(body.measured_at);
-  if (when.error) return { status: 400, error: when.error };
-  await save(r, {
-    value_numeric: value, value_secondary: secondary, unit: body.unit || undefined, measured_at: when.at || undefined,
-    measurement_context: body.measurement_context || undefined, body_position: body.body_position || undefined,
-    device_name: body.device_name || undefined, notes: body.notes || undefined,
-  });
-  const data = row(r);
-  await audit({ userId: user.user_id, event: "UPDATE", targetClass: "VitalReading", targetId: r.id, oldData, newData: data });
-  const out = { status: 200, message: "Vital sign updated", reading: data, evaluation: evaluate(data, type, await activeTarget(user.user_id, oldData.vital_type)) };
-  const bmi = await bmiAfterSave(user, data, { isNew: false });
-  if (bmi) out.bmi = bmi;
-  return out;
+// ---- the automatic BMI after a browser save / delete (access.js RULES.VitalReading; runs with the master key) ----
+// A weight or height saved by the browser refreshes (or makes) its calculated BMI, as the old routes did.
+async function afterBrowserSave(obj, { original }) {
+  await bmiAfterSave({ user_id: obj.get("user_id") }, row(obj), { isNew: !original });
 }
-
-async function remove(id, user) {
-  if (!isId(id)) return { status: 400, error: "Invalid vital log ID" };
-  const r = await getOwned("VitalReading", id, user.user_id);
-  if (!r) return { status: 404, error: "Reading not found" };
-  if (r.get("source") === BMI_SOURCE) return { status: 400, error: CALCULATED_BMI_REMOVE_MESSAGE };
-  const oldData = row(r);
-  await r.destroy(M);
-  await audit({ userId: user.user_id, event: "DELETE", targetClass: "VitalReading", targetId: id, oldData });
-  if (oldData.vital_type === "weight" || oldData.vital_type === "height") await bmiAfterDelete(user, id);
-  return { status: 200, message: "Vital sign deleted" };
+// a removed weight or height removes the BMI built from it
+async function afterBrowserDelete(obj) {
+  const vt = obj.get("vital_type");
+  if (vt === "weight" || vt === "height") await bmiAfterDelete({ user_id: obj.get("user_id") }, obj.id);
 }
+// a calculated BMI is never removed from the browser (it goes with its weight or height)
+const deleteProblem = (obj) => (obj.get("source") === BMI_SOURCE ? CALCULATED_BMI_REMOVE_MESSAGE : null);
 
-// GET /vitals/summary (also used by share codes)
+// latest reading per type + in/out of range (share codes; the website has its own copy in
+// Vite/src/data/vitals.ts)
 async function summary(user) {
   const all = await readings(user.user_id);
   const latest = new Map();
@@ -376,122 +362,5 @@ async function summary(user) {
   return { status: 200, summary: out, tracked_types: out.length, flagged_count: flagged };
 }
 
-// bucket start (UTC) for a timestamp
-function bucketStart(iso, size) {
-  const d = new Date(iso);
-  if (size === "day") return d.toISOString().slice(0, 10);
-  if (size === "month") return `${d.toISOString().slice(0, 7)}-01`;
-  // week: Monday (like Postgres date_trunc('week'))
-  const day = (d.getUTCDay() + 6) % 7;
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - day)).toISOString().slice(0, 10);
-}
-const round2 = (n) => Number(n.toFixed(2));
-function buckets(rows, size) {
-  const map = new Map();
-  for (const r of [...rows].sort((a, b) => a.measured_at.localeCompare(b.measured_at))) {
-    const k = bucketStart(r.measured_at, size);
-    if (!map.has(k)) map.set(k, []);
-    map.get(k).push(r);
-  }
-  return [...map.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([start, list]) => {
-    const vals = list.map((r) => Number(r.value_numeric));
-    const secs = list.filter((r) => r.value_secondary != null).map((r) => Number(r.value_secondary));
-    const avg = (a) => (a.length ? round2(a.reduce((s, x) => s + x, 0) / a.length) : null);
-    return {
-      bucket_start: start, reading_count: list.length, avg_value: avg(vals), min_value: Math.min(...vals), max_value: Math.max(...vals),
-      avg_secondary: avg(secs), min_secondary: secs.length ? Math.min(...secs) : null, max_secondary: secs.length ? Math.max(...secs) : null,
-    };
-  });
-}
-
-// GET /vitals/trends?type=&days=&bucket=
-async function trends(query, user) {
-  const vitalType = param(query, "type");
-  if (!vitalType) return { status: 400, error: "Missing required parameter: type" };
-  const rawDays = parseInt(param(query, "days"), 10);
-  const days = Number.isInteger(rawDays) && rawDays > 0 ? Math.min(rawDays, 365) : 30;
-  const bucket = String(param(query, "bucket") || "day").toLowerCase();
-  if (!["day", "week", "month"].includes(bucket)) return { status: 400, error: "bucket must be one of: day, week, month" };
-  const type = typeOf(vitalType);
-  if (!type) return { status: 400, error: `Unknown vital_type: ${vitalType}` };
-  const since = new Date(Date.now() - days * 86400000).toISOString();
-  const raw = (await readings(user.user_id, vitalType)).filter((r) => r.measured_at >= since).reverse();
-  const target = await activeTarget(user.user_id, vitalType);
-  const range = evaluate({ value_numeric: 0 }, type, target).range;
-  const outOfRange = raw.filter((r) => ["above_range", "below_range"].includes(evaluate(r, type, target).status)).length;
-  let direction = "insufficient_data", change = null;
-  if (raw.length >= 4) {
-    const mid = Math.floor(raw.length / 2);
-    const mean = (rows) => rows.reduce((s, r) => s + Number(r.value_numeric), 0) / rows.length;
-    const first = mean(raw.slice(0, mid)), second = mean(raw.slice(mid));
-    change = round2(second - first);
-    direction = Math.abs(change) < Math.abs(first) * 0.05 ? "stable" : change > 0 ? "rising" : "falling";
-  }
-  return {
-    status: 200, vital_type: vitalType, display_name: type.display_name, unit: type.default_unit, is_dual_value: type.is_dual_value,
-    window_days: days, bucket, range, buckets: buckets(raw, bucket), total_readings: raw.length, out_of_range_count: outOfRange,
-    trend: { direction, change },
-  };
-}
-
-const RANGE_SPEC = {
-  week: { bucket: "day", days: 7, label: "Past week" }, month: { bucket: "day", days: 30, label: "Past month" },
-  year: { bucket: "month", days: 365, label: "Past year" }, all: { bucket: "month", days: null, label: "All time" },
-};
-
-// GET /vitals/quick-look?range=week|month|year|all&type=
-async function quickLook(query, user) {
-  const range = String(param(query, "range") || "month").toLowerCase();
-  const spec = RANGE_SPEC[range];
-  if (!spec) return { status: 400, error: `Invalid range. Must be one of: ${Object.keys(RANGE_SPEC).join(", ")}` };
-  const onlyType = param(query, "type");
-  if (onlyType && !typeOf(onlyType)) return { status: 400, error: `Unknown vital_type: ${onlyType}` };
-  const all = await readings(user.user_id, onlyType);
-  const present = VITAL_TYPES.filter((t) => all.some((r) => r.vital_type === t.vital_type));
-  const todayUtc = new Date().toISOString().slice(0, 10);
-  const windowStart = spec.days ? new Date(Date.parse(`${todayUtc}T00:00:00Z`) - spec.days * 86400000).toISOString().slice(0, 10) : null;
-  const cards = [];
-  const bmiDob = present.some((t) => t.vital_type === "bmi") ? await dobOf(user.user_id) : null;
-  for (const type of present) {
-    const ofType = all.filter((r) => r.vital_type === type.vital_type);
-    const series = buckets(ofType, spec.bucket).filter((b) => !windowStart || b.bucket_start >= windowStart);
-    const latestRow = ofType[0];
-    let change = null;
-    if (series.length >= 2) {
-      const first = series[0].avg_value, last = series[series.length - 1].avg_value;
-      const delta = round2(last - first);
-      change = { from: first, to: last, delta, percent: first !== 0 ? Number(((delta / first) * 100).toFixed(1)) : null,
-        direction: Math.abs(delta) < Math.abs(first) * 0.03 ? "steady" : delta > 0 ? "up" : "down" };
-      if (type.is_dual_value && series[0].avg_secondary != null) {
-        const fs = series[0].avg_secondary, ls = series[series.length - 1].avg_secondary;
-        change.secondary = { from: fs, to: ls, delta: round2(ls - fs) };
-      }
-    }
-    const target = await activeTarget(user.user_id, type.vital_type);
-    const evaluation = latestRow ? evaluate(latestRow, type, target) : null;
-    let bucketsOut = 0;
-    if (evaluation && evaluation.status !== "no_range") {
-      for (const bk of series) {
-        const e = evaluate({ value_numeric: bk.avg_value, value_secondary: bk.avg_secondary }, type, target);
-        if (e.status === "above_range" || e.status === "below_range") bucketsOut++;
-      }
-    }
-    cards.push({
-      vital_type: type.vital_type, display_name: type.display_name, unit: type.default_unit, is_dual_value: type.is_dual_value,
-      value_label: type.value_label, secondary_label: type.secondary_label, decimal_places: type.decimal_places,
-      today: latestRow ? {
-        value: Number(latestRow.value_numeric), secondary: latestRow.value_secondary != null ? Number(latestRow.value_secondary) : null,
-        unit: latestRow.unit, measured_at: latestRow.measured_at, is_today: latestRow.measured_at.slice(0, 10) === todayUtc,
-        age_label: describeAge(Math.max(0, (Date.now() - Date.parse(latestRow.measured_at)) / 1000)),
-        context: latestRow.measurement_context, evaluation, source: latestRow.source,
-        ...(type.vital_type === "bmi" ? { bmi_info: bmiInfoFor(latestRow, bmiDob) } : {}),
-      } : null,
-      series: series.map((bk) => ({ bucket_start: bk.bucket_start, value: bk.avg_value, secondary: bk.avg_secondary,
-        min: bk.min_value, max: bk.max_value, reading_count: bk.reading_count })),
-      change, buckets_out_of_range: bucketsOut, range: evaluation ? evaluation.range : null,
-    });
-  }
-  return { status: 200, range, range_label: spec.label, bucket_size: spec.bucket, source: "readings", cards };
-}
-
-module.exports = { types, list, getById, create: createVital, update, remove, summary, trends, quickLook, typeOf, findOne, computeBmi, ageOn, bmiCategory };
+// validate, clean, row, FIELDS and the BMI hooks are also used by access.js (RULES.VitalReading)
+module.exports = { list, create: createVital, summary, validate, clean, row, FIELDS, afterBrowserSave, afterBrowserDelete, deleteProblem };

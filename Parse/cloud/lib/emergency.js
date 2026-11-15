@@ -4,10 +4,14 @@
 // gets an emergency code for a wallet card / phone lock screen. A responder needs NO account:
 // they enter the code plus their name and agency. Every open is logged and the patient is notified.
 //
-//   Patient routes (patient accounts only):
-//   GET    /emergency/settings      settings + code info + the lists the form needs
-//   PUT    /emergency/settings      change settings (only the fields sent change)
-//   GET    /emergency/preview       exactly what a responder would see right now
+//   The settings (EmergencyProfile) are read and saved by the website with the Parse SDK (Vite/src/data/emergency.ts,
+//   which also builds the "what a responder sees" preview from the patient's own rows), guarded by RULES.EmergencyProfile
+//   in access.js with the rules below (profileProblem / profileValues = the old PUT /emergency/settings checks, through
+//   settingsValues): one row per user (a second create is refused, parallel creates are removed again after the save),
+//   directive_updated_at is set by the server, and a directive_document_id must be one of the caller's own documents.
+//
+//   Patient routes (patient accounts only; the code itself stays on the server: EmergencyAccess is locked):
+//   GET    /emergency/code          the code info (has_code, code, created_at, last_opened_at, open_count)
 //   POST   /emergency/code          create the emergency code, or replace the old one
 //   DELETE /emergency/code          turn the code off (access stops immediately)
 //   GET    /emergency/access-log    who opened it, newest first
@@ -22,7 +26,7 @@
 // says so and says whether a signed order (POLST/MOLST/DNR form) is on file.
 
 const sec = require("./security");
-const { M, isId, findAll, findOne, getOwned, create, save, audit, optText, fail } = require("./db");
+const { M, isId, findAll, findOne, oldestRow, keepOldest, getOwned, create, save, audit, optText, fail } = require("./db");
 
 // ---------- options ----------
 // code_status is the headline; declined_measures is the detail (a patient can be "full code" except for one thing)
@@ -74,8 +78,9 @@ const DEFAULTS = {
   directive_document_id: null, share_directive_document: false,
 };
 
+// the oldest row (one per user; see profileAfterSave)
 async function profileObject(userId) {
-  return findOne("EmergencyProfile", { user_id: userId });
+  return oldestRow("EmergencyProfile", userId);
 }
 function settingsOf(obj) {
   const get = (k) => (obj && obj.get(k) !== undefined && obj.get(k) !== null ? obj.get(k) : DEFAULTS[k]);
@@ -181,31 +186,35 @@ const liveAccess = async (userId) => {
   return rows.find((r) => !r.get("revoked")) || null;
 };
 
-// GET /emergency/settings
-async function getSettings(user) {
-  const profile = await profileObject(user.user_id);
-  return {
-    status: 200, settings: settingsOf(profile), access: codeInfo(await liveAccess(user.user_id)),
-    options: { code_statuses: CODE_STATUSES.map((value) => ({ value, label: CODE_STATUS_LABELS[value] })),
-      measures: Object.entries(MEASURES).map(([value, label]) => ({ value, label })),
-      implied_by_status: IMPLIED, sections: SECTIONS, blood_types: BLOOD_TYPES, max_contacts: MAX_CONTACTS },
-    disclaimer: DISCLAIMER,
-  };
+// GET /emergency/code — the code info the settings page shows (the settings themselves are read by the website)
+async function codeStatus(user) {
+  return { status: 200, access: codeInfo(await liveAccess(user.user_id)) };
 }
 
-// PUT /emergency/settings
-async function putSettings(body, user, ctx) {
-  if (!body || typeof body !== "object" || Array.isArray(body)) return fail(400, "Missing settings");
-  const profile = await profileObject(user.user_id);
-  const current = settingsOf(profile);
-  const r = await settingsValues(body, user.user_id, current);
-  if (r.error) return fail(400, r.error);
-  if (!Object.keys(r.values).length) return fail(400, "Nothing to change");
-  const saved = profile ? await save(profile, r.values) : await create("EmergencyProfile", { user_id: user.user_id, ...r.values });
-  const settings = settingsOf(saved);
-  await audit({ userId: user.user_id, event: profile ? "UPDATE" : "INSERT", targetClass: "EmergencyProfile", targetId: saved.id,
-    oldData: profile ? current : null, newData: settings, ip: ctx.ip });
-  return { status: 200, message: "Emergency settings saved", settings };
+// ---- browser saves (access.js RULES.EmergencyProfile): the old PUT /emergency/settings rules ----
+const PROFILE_BROWSER_FIELDS = ["enabled", "sections", "blood_type", "medical_notes", "contacts", "code_status", "declined_measures",
+  "directive_notes", "polst_on_file", "directive_document_id", "share_directive_document"];
+const PROFILE_TYPES = { enabled: "boolean", polst_on_file: "boolean", share_directive_document: "boolean", sections: "array", contacts: "array",
+  declined_measures: "array" };
+const PROFILE_EXISTS = "Your emergency settings are already saved";
+const PROFILE_NOT_REMOVABLE = "Emergency settings can't be removed. Turn emergency access off instead.";
+// the audit rows hold the settings as the page sees them, as the old route's did
+const profileAuditRow = (o) => settingsOf(o);
+// body = the sent fields (a removed field is null, which settingsValues treats as sent: e.g. enabled must be true/false)
+async function profileProblem(body, { user, original }) {
+  if (!Object.keys(body).length) return "Nothing to change";
+  if (!original && await profileObject(user.id)) return PROFILE_EXISTS;
+  const r = await settingsValues(body, user.id, settingsOf(original || null));
+  return r.error || null;
+}
+// the cleaned values (directive_updated_at and the "no document, nothing to share" rule come from settingsValues)
+async function profileValues(body, { user, original }) {
+  return (await settingsValues(body, user.id, settingsOf(original || null))).values;
+}
+const profileDeleteProblem = () => PROFILE_NOT_REMOVABLE;
+// after a browser create: one row per user, the oldest wins
+async function profileAfterSave(obj, { original, ip }) {
+  if (!original) await keepOldest("EmergencyProfile", obj.get("user_id"), { ip, row: profileAuditRow });
 }
 
 // POST /emergency/code — makes (or replaces) the code. The old code stops working at once.
@@ -259,7 +268,7 @@ async function snapshot(userId) {
   const profile = await profileObject(userId);
   const s = settingsOf(profile);
   const patient = await new Parse.Query(Parse.User).get(userId, M);
-  const rec = await findOne("MedicalRecord", { user_id: userId });
+  const rec = await oldestRow("MedicalRecord", userId);
   const data = (rec && rec.get("data")) || {};
   const p = data.patient || {};
 
@@ -300,12 +309,6 @@ async function snapshot(userId) {
   }
   out.sections = s.sections;
   return { out, settings: s };
-}
-
-// GET /emergency/preview
-async function preview(user) {
-  const { out } = await snapshot(user.user_id);
-  return { status: 200, preview: out, disclaimer: DISCLAIMER };
 }
 
 // ---------- responder routes ----------
@@ -410,6 +413,7 @@ async function accessLog(user) {
 }
 
 module.exports = {
-  getSettings, putSettings, createCode, revokeCode, preview, respond, respondDocument, accessLog,
+  codeStatus, createCode, revokeCode, respond, respondDocument, accessLog,
   CODE_STATUSES, MEASURES, IMPLIED, SECTIONS, DISCLAIMER, settingsValues,
+  PROFILE_BROWSER_FIELDS, PROFILE_TYPES, profileProblem, profileValues, profileDeleteProblem, profileAfterSave, profileAuditRow,
 };

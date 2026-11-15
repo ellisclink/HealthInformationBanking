@@ -6,19 +6,24 @@
 //   3. browser: Parse.User.logIn(email, password)
 //      beforeLogin (below) only lets a login through if step 2 happened in the last 5 minutes,
 //      so calling Parse's login directly without the code is refused.
+//      afterLogin then makes the SessionActivity row; checkSession refuses any session without one.
 //
 // Rate limits: every attempt is counted BEFORE it is checked (sec.take) and given back when it turns out to be fine
 // (sec.refund / sec.resetLimit). Checking first and counting afterwards lets many guesses sent at the same moment all
 // get through. Parse's own /login is not covered by these limits: turn on Parse's account lockout too (see the README).
 //
-// Users: username = email (lower case), plus name, role ('patient' | 'physician') and npi.
-// Only Cloud Code (master key) can create or change a user, so nobody can make
-// themselves a physician from the browser.
+// Users: username = email (lower case), plus name and role. Every account is a patient (physician accounts were
+// removed on 2026-11-06; the convertPhysicians job in main.js turns old ones into patients). Old rows may still have
+// an npi column; nothing reads it any more.
+// A browser may CREATE an account with Parse's signUp (Register page), but only with the fields beforeSaveUser allows:
+// it always becomes a patient, with the terms recorded, and gets no usable session (afterSaveUser). Only Cloud Code
+// (master key) can change a user, so nobody can give themselves another role from the browser.
 
 const { M, findAll, findOne, create, save, destroyAll, audit } = require("./db");
 const sec = require("./security");
 const legal = require("./legal");
 const password = require("./password");
+const { clientIp } = require("./clientip");
 
 const CODE_TTL_MIN = 10;
 const MAX_CODE_ATTEMPTS = 5;
@@ -39,7 +44,7 @@ const passwordProblem = (pw, who) => password.firstProblem(pw, who);
 // plain user object handed to the feature modules
 const asUser = (u) => u && ({
   user_id: u.id, user_email: u.get("username"), user_name: u.get("name") || u.get("username"),
-  role: u.get("role") || "patient", npi: u.get("npi") || null, terms_version: u.get("terms_version") || null,
+  role: u.get("role") || "patient", terms_version: u.get("terms_version") || null,
 });
 
 async function userByEmail(email) {
@@ -48,40 +53,69 @@ async function userByEmail(email) {
   return q.first(M);
 }
 
-// ---------- POST /register {email, name, password} ----------
-async function register(body, ctx) {
-  const ipKey = `register-ip:${ctx.ip}`;
-  if ((await sec.take(ipKey, HOUR)) > 10) return tooMany(ipKey, "sign-ups from this device");   // 10 sign-ups an hour
-  const { email, name, password } = body;
+// ---------- sign-up: the browser calls Parse's own signUp (Register page) ----------
+// beforeSaveUser (below) checks and completes the new account before Parse stores it; afterSaveUser then revokes the
+// session signUp hands out (the only way in is login + emailed code), confirms the owner-only ACL, creates the
+// MedicalRecord and writes the audit rows. Nothing a browser sends can pick the role or skip the terms.
+const SIGNUP_FIELDS = new Set(["username", "email", "password", "name", "accepted_terms", "ACL"]);
+const invalid = (message) => new Parse.Error(Parse.Error.VALIDATION_ERROR, message);
+
+async function checkSignUp(request) {
+  const user = request.object;
+  // counted first: 10 sign-ups an hour per device (every attempt counts, as the old POST /register did).
+  // The address is chosen the same way as for the api function (clientip.js, TRUSTED_PROXY_HOPS).
+  const ipKey = `register-ip:${clientIp(request)}`;
+  if ((await sec.take(ipKey, HOUR)) > 10) {
+    throw new Parse.Error(Parse.Error.REQUEST_LIMIT_EXCEEDED, `too many sign-ups from this device — try again in ${await sec.minutesLeft(ipKey)} minute(s)`);
+  }
+  const sent = new Set([...Object.keys(user.attributes || {}), ...user.dirtyKeys()]);
+  for (const key of sent) if (!SIGNUP_FIELDS.has(key)) throw invalid(`unknown field: ${key}`);
+
+  const email = user.get("email"), name = user.get("name"), password = user.get("password");
   if (typeof email !== "string" || typeof name !== "string" || typeof password !== "string" || !email.trim() || !name.trim() || !password) {
-    return { status: 400, error: "email, name, password required" };
+    throw invalid("email, name, password required");
   }
   // agreeing to the Terms and Privacy Policy (and being 18 or older) is required, and is recorded with the account
-  if (body.accepted_terms !== true) return { status: 400, error: `you must agree to the Terms of Service and Privacy Policy, and confirm you are ${legal.MIN_AGE} or older` };
+  if (user.get("accepted_terms") !== true) throw invalid(`you must agree to the Terms of Service and Privacy Policy, and confirm you are ${legal.MIN_AGE} or older`);
   const cleanEmail = email.toLowerCase().trim();
   const cleanName = name.trim();
-  if (cleanEmail.length > 255 || !EMAIL_RE.test(cleanEmail)) return { status: 400, error: "please enter a valid email address" };
-  if (cleanName.length > 255) return { status: 400, error: "name must be 255 characters or fewer" };
+  if (cleanEmail.length > 255 || !EMAIL_RE.test(cleanEmail)) throw invalid("please enter a valid email address");
+  if (cleanName.length > 255) throw invalid("name must be 255 characters or fewer");
   const pwError = passwordProblem(password, { email: cleanEmail, name: cleanName });
-  if (pwError) return { status: 400, error: `Choose a stronger password. ${pwError}` };
-  if (await userByEmail(cleanEmail)) return { status: 409, error: "email already registered" };
+  if (pwError) throw invalid(`Choose a stronger password. ${pwError}`);
+  if (await userByEmail(cleanEmail)) throw new Parse.Error(Parse.Error.EMAIL_TAKEN, "email already registered");
 
-  const user = new Parse.User();
-  user.set({ username: cleanEmail, email: cleanEmail, password, name: cleanName, role: "patient", ...legal.acceptanceFields() });
-  try {
-    await user.signUp(null, M);
-  } catch (err) {
-    if (err.code === Parse.Error.USERNAME_TAKEN || err.code === Parse.Error.EMAIL_TAKEN) return { status: 409, error: "email already registered" };
-    throw err;
-  }
-  // only the owner (and Cloud Code) can see the account; no session until they pass 2FA
-  user.setACL(new Parse.ACL(user));
-  await user.save(null, M);
-  await endAllSessions(user.id);
-  await create("MedicalRecord", { user_id: user.id, data: {} });
-  await audit({ userId: user.id, event: "register", ip: ctx.ip });
-  await audit({ userId: user.id, event: "terms_accepted", ip: ctx.ip, detail: { version: legal.TERMS_VERSION } });
-  return { status: 201, ok: true };
+  // every account is a patient; the username is the email
+  user.set({ username: cleanEmail, email: cleanEmail, name: cleanName, role: "patient", ...legal.acceptanceFields() });
+  user.unset("accepted_terms");
+  // nobody but the master key; Parse then adds the new user itself (read + write), so the stored ACL is owner-only
+  user.setACL(new Parse.ACL());
+}
+
+// beforeSave on users: a browser may only CREATE an account (checked above); every change goes through Cloud Code
+async function beforeSaveUser(request) {
+  if (request.master) return;
+  if (request.original || request.object.id) throw new Parse.Error(Parse.Error.OPERATION_FORBIDDEN, "Accounts are changed through the app.");
+  await checkSignUp(request);
+}
+
+// afterSave on users: a browser sign-up leaves no usable session. Parse waits for this trigger but only LOGS an error
+// from it, so every step is tried on its own (one failing does not skip the others) and each failure is logged. The
+// session signUp made is ended first; checkSession refuses it anyway, because only afterLogin starts a session.
+async function afterSaveUser(request) {
+  if (request.master || request.original) return;
+  const user = request.object;
+  const ip = clientIp(request);
+  const step = async (name, fn) => {
+    try { await fn(); } catch (err) { console.error(`sign-up ${user.id}: ${name} failed:`, err && err.message ? err.message : "error"); }
+  };
+  await step("ending the sign-up session", () => endAllSessions(user.id, "signup", ip));   // first: the token signUp returned stops working
+  await step("setting the owner-only ACL", async () => { user.setACL(new Parse.ACL(user)); await user.save(null, M); });
+  await step("creating the MedicalRecord", async () => {   // only if there isn't one yet
+    if (!(await findOne("MedicalRecord", { user_id: user.id }))) await create("MedicalRecord", { user_id: user.id, data: {} });
+  });
+  await step("the register audit row", () => audit({ userId: user.id, event: "register", ip }));
+  await step("the terms audit row", () => audit({ userId: user.id, event: "terms_accepted", ip, detail: { version: legal.TERMS_VERSION } }));
 }
 
 // ---------- POST /login {email, password} — step 1 ----------
@@ -186,6 +220,18 @@ async function beforeLogin(request) {
   await audit({ userId: user.id, event: "login_success", ip: request.ip });
 }
 
+// afterLogin: the ONLY place a session's SessionActivity row is made. Parse has just created the session for this login
+// (after beforeLogin passed) and its token is on request.object. checkSession refuses any session without a row, so a
+// session made any other way (Parse's public POST /sessions, which anyone holding a token can call, or the session
+// signUp hands out) never works. If this fails, Parse answers the login with an error and the session is refused on use.
+async function afterLogin(request) {
+  const user = request.object;
+  const token = user && typeof user.getSessionToken === "function" ? user.getSessionToken() : null;
+  if (!user || !user.id || !token) throw new Parse.Error(Parse.Error.OTHER_CAUSE, "The login could not be completed; please try again.");
+  const now = new Date();
+  await create("SessionActivity", { token_hash: sec.sha256(token), user_id: user.id, started_at: now, last_seen: now });
+}
+
 // ---------- POST /forget {email} ----------
 async function forget(body, ctx) {
   const { email } = body;
@@ -265,30 +311,26 @@ async function endAllSessions(userId, reason = "sessions_ended", ip = null) {
   await require("./calendarFeed").revokeAllForUser(userId, reason, ip);
 }
 
-// Called before every logged-in api request. Ends the session after 30 idle minutes
-// or 12 hours, whichever comes first. Returns the user, or null if the session is over.
+// Called before every logged-in api request (and by access.js for the owner classes). Ends the session after 30 idle
+// minutes or 12 hours, whichever comes first. Returns the user, or null if the session is over.
+// A session counts only if it has a SessionActivity row, and only afterLogin (a real login, after the emailed code)
+// makes one. A token with no row (a session minted with Parse's POST /sessions, the session signUp returns, or one
+// already ended) is refused and its _Session deleted. A row is never created here.
 async function checkSession(parseUser, sessionToken) {
   if (!parseUser || !sessionToken) return null;
-  const tokenHash = sec.sha256(sessionToken);
   const now = Date.now();
-  let activity = await findOne("SessionActivity", { token_hash: tokenHash });
-  if (activity) {
-    const idle = now - activity.get("last_seen").getTime() > SESSION_IDLE_MIN * 60000;
-    const old = now - activity.get("started_at").getTime() > SESSION_MAX_HOURS * HOUR;
-    if (idle || old) {
-      await endSession(sessionToken);
-      return null;
-    }
-    await save(activity, { last_seen: new Date() });
-  } else {
-    // first request on this session: it must have been created recently (fresh login)
-    const s = await new Parse.Query(Parse.Session).equalTo("sessionToken", sessionToken).first(M);
-    if (!s || now - s.createdAt.getTime() > SESSION_IDLE_MIN * 60000) {
-      if (s) await s.destroy(M);
-      return null;
-    }
-    activity = await create("SessionActivity", { token_hash: tokenHash, user_id: parseUser.id, started_at: s.createdAt, last_seen: new Date() });
+  const activity = await findOne("SessionActivity", { token_hash: sec.sha256(sessionToken) });
+  if (!activity || activity.get("user_id") !== parseUser.id) {
+    await endSession(sessionToken);
+    return null;
   }
+  const idle = now - activity.get("last_seen").getTime() > SESSION_IDLE_MIN * 60000;
+  const old = now - activity.get("started_at").getTime() > SESSION_MAX_HOURS * HOUR;
+  if (idle || old) {
+    await endSession(sessionToken);
+    return null;
+  }
+  await save(activity, { last_seen: new Date() });
   return asUser(parseUser);
 }
 
@@ -308,38 +350,45 @@ async function logout(ctx) {
   return { status: 200, ok: true };
 }
 
+// afterLogout (Parse.User.logOut in the browser): Parse has already deleted the session; write the "logout" audit row
+// and end SessionActivity for that token, the same as POST /logout
+async function afterLogout(request) {
+  const session = request.object;
+  const token = session && session.get("sessionToken");
+  const user = session && session.get("user");
+  if (user && user.id) await audit({ userId: user.id, event: "logout", ip: clientIp(request) });
+  if (token) await endSession(token);
+}
+
 // ---------- GET /me ----------
 const me = (user) => ({
   status: 200, user_id: user.user_id, email: user.user_email, name: user.user_name, role: user.role,
-  ...(user.role === "physician" ? { npi: user.npi } : {}),
   terms: legal.status(user.terms_version),
 });
 
-// ---------- admin: make someone a physician (master key only) ----------
-// Back4app dashboard > API Console > Cloud Code functions:
-//   makePhysician  {"email": "doctor@example.com", "npi": "1234567893"}   (use the Master Key)
-async function makePhysician({ email, npi }) {
-  const cleanEmail = String(email || "").toLowerCase().trim();
-  const user = await userByEmail(cleanEmail);
-  if (!user) throw new Parse.Error(Parse.Error.OBJECT_NOT_FOUND, `No account with email ${cleanEmail}. Have them sign up first.`);
-  const typed = String(npi || "").replace(/\s+/g, "");
-  if (!sec.isValidNpi(typed)) throw new Parse.Error(Parse.Error.VALIDATION_ERROR, "That is not a valid 10-digit NPI (check digit failed).");
-  const q = new Parse.Query(Parse.User);
-  q.equalTo("npi", typed);
-  q.notEqualTo("objectId", user.id);
-  if (await q.first(M)) throw new Parse.Error(Parse.Error.DUPLICATE_VALUE, "That NPI is already on another account.");
-  user.set({ role: "physician", npi: typed });
-  await user.save(null, M);
-  await audit({ userId: user.id, event: "made_physician", detail: { npi: typed } });
-  return { ok: true, email: cleanEmail, role: "physician", npi: typed };
-}
-
-// beforeSave on users: only Cloud Code may create or change accounts
-function beforeSaveUser(request) {
-  if (!request.master) throw new Parse.Error(Parse.Error.OPERATION_FORBIDDEN, "Accounts are changed through the app.");
+// ---------- job convertPhysicians (master key; run once after deploying) ----------
+// There are no physician accounts any more: every account that is not a plain patient (role "physician", any other
+// role, or an old npi value) becomes a patient with no npi. Each change is audited ("role_cleared"). Safe to repeat.
+async function convertPhysicians() {
+  let converted = 0;
+  for (;;) {
+    const notPatient = new Parse.Query(Parse.User).notEqualTo("role", "patient");
+    const hasNpi = new Parse.Query(Parse.User).exists("npi");
+    const rows = await Parse.Query.or(notPatient, hasNpi).limit(500).find(M);
+    if (!rows.length) break;
+    for (const u of rows) {
+      const oldRole = u.get("role") ?? null;
+      u.set("role", "patient");
+      u.unset("npi");
+      await u.save(null, M);
+      await audit({ userId: u.id, event: "role_cleared", detail: { old_role: oldRole } });
+      converted++;
+    }
+  }
+  return { converted };
 }
 
 module.exports = {
-  register, login, verify2fa, beforeLogin, forget, reset, logout, me, checkSession, makePhysician,
-  beforeSaveUser, endAllSessions, asUser, userByEmail, SESSION_IDLE_MIN,
+  login, verify2fa, beforeLogin, afterLogin, forget, reset, logout, afterLogout, me, checkSession,
+  beforeSaveUser, afterSaveUser, convertPhysicians, endAllSessions, asUser, userByEmail, SESSION_IDLE_MIN,
 };

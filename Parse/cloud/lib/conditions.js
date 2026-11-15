@@ -1,9 +1,9 @@
-// conditions.js — Condition management (Tasks 3.3 / 3.4), on Parse.
-//   GET/POST /conditions, GET /conditions/summary, GET/PUT/DELETE /conditions/:id,
-//   GET/POST /conditions/:id/notes, POST /conditions/:id/targets
-// Classes: Condition, ConditionNote, ConditionTarget
+// conditions.js — server-side helpers for Conditions. Classes: Condition, ConditionNote, ConditionTarget
+//   The Conditions page reads and saves with the Parse SDK (Vite/src/data/conditions.ts); the owner-only rules in access.js
+//   (RULES) use the validators and row shapes from here. There are no /conditions routes any more. Also used by seed,
+//   autofill and ccda.
 
-const { M, isId, isDateTime, today, toRow, findAll, getOwned, save, create, destroyAll, audit, param } = require("./db");
+const { isId, isDateTime, today, toRow, findAll, getOwned, save, create, audit, param } = require("./db");
 const { VITAL_TYPES } = require("./reference");
 
 const FIELDS = ["user_id", "condition_name", "icd10_code", "category", "status", "severity", "onset_date", "diagnosed_date",
@@ -47,15 +47,6 @@ async function list(query, user) {
   return { status: 200, conditions: sortConditions(rows), count: rows.length };
 }
 
-async function getById(id, user) {
-  const c = await getOwned("Condition", id, user.user_id);
-  if (!c) return notFound(id);
-  const notes = (await findAll("ConditionNote", { condition_id: c.id })).map(noteRow)
-    .sort((a, b) => b.note_date.localeCompare(a.note_date) || b.created_at.localeCompare(a.created_at));
-  const targets = (await findAll("ConditionTarget", { condition_id: c.id })).map(targetRow).sort((a, b) => b.created_at.localeCompare(a.created_at));
-  return { status: 200, condition: row(c), notes, targets };
-}
-
 async function createCondition(body, user) {
   if (!body || !body.condition_name) return { status: 400, error: "Missing required field: condition_name" };
   const name = String(body.condition_name).trim();
@@ -76,50 +67,6 @@ async function createCondition(body, user) {
   const data = row(c);
   await audit({ userId: user.user_id, event: "INSERT", targetClass: "Condition", targetId: c.id, newData: data });
   return { status: 201, message: "Condition added", condition: data };
-}
-
-async function update(id, body, user) {
-  if (!body || Object.keys(body).length === 0) return { status: 400, error: "No fields to update" };
-  const err = validate(body);
-  if (err) return { status: 400, error: err };
-  const c = await getOwned("Condition", id, user.user_id);
-  if (!c) return notFound(id);
-  const old = row(c);
-  const nextStatus = body.status || old.status;
-  let nextResolved = body.resolved_date !== undefined ? dateOnly(body.resolved_date) : old.resolved_date;
-  if (nextStatus === "resolved" && !nextResolved) return { status: 400, error: "Set resolved_date when marking a condition resolved" };
-  if (nextStatus !== "resolved") nextResolved = null;
-  if ("condition_name" in body && !String(body.condition_name ?? "").trim()) return { status: 400, error: "condition_name cannot be empty" };
-  const updates = { status: nextStatus, resolved_date: nextResolved };
-  const map = {
-    condition_name: (v) => String(v).trim(), icd10_code: (v) => (text(v) ? text(v).toUpperCase() : null), category: text, severity: text,
-    onset_date: dateOnly, diagnosed_date: dateOnly, diagnosing_provider: text, managing_provider: text, provider_facility: text,
-    is_primary: (v) => v === true, notes: text,
-  };
-  for (const [f, conv] of Object.entries(map)) if (f in body) updates[f] = conv(body[f]);
-  await save(c, updates);
-  const data = row(c);
-  await audit({ userId: user.user_id, event: "UPDATE", targetClass: "Condition", targetId: c.id, oldData: old, newData: data });
-  return { status: 200, message: "Condition updated", condition: data };
-}
-
-async function remove(id, user) {
-  const c = await getOwned("Condition", id, user.user_id);
-  if (!c) return notFound(id);
-  const old = row(c);
-  await destroyAll(await findAll("ConditionNote", { condition_id: c.id }));
-  await destroyAll(await findAll("ConditionTarget", { condition_id: c.id }));
-  await c.destroy(M);
-  await audit({ userId: user.user_id, event: "DELETE", targetClass: "Condition", targetId: id, oldData: old });
-  return { status: 200, message: "Condition deleted" };
-}
-
-async function notes(id, user) {
-  const c = await getOwned("Condition", id, user.user_id);
-  if (!c) return notFound(id);
-  const rows = (await findAll("ConditionNote", { condition_id: c.id })).map(noteRow)
-    .sort((a, b) => b.note_date.localeCompare(a.note_date) || b.created_at.localeCompare(a.created_at));
-  return { status: 200, notes: rows, count: rows.length };
 }
 
 async function addNote(id, body, user) {
@@ -159,23 +106,6 @@ async function setTarget(id, body, user) {
   return { status: 201, message: "Target set", target: data };
 }
 
-async function summary(user) {
-  const all = (await findAll("Condition", { user_id: user.user_id })).map(row);
-  const allNotes = (await findAll("ConditionNote", { user_id: user.user_id })).map(noteRow);
-  const count = (key) => {
-    const m = new Map();
-    for (const r of all) m.set(r[key] ?? "uncategorized", (m.get(r[key] ?? "uncategorized") || 0) + 1);
-    return [...m.entries()].map(([k, n]) => ({ [key]: k, count: n }));
-  };
-  const active = sortConditions(all.filter((r) => ["active", "managed"].includes(r.status))).map((r) => {
-    const ns = allNotes.filter((n) => n.condition_id === r.condition_id);
-    return { condition_id: r.condition_id, condition_name: r.condition_name, icd10_code: r.icd10_code, category: r.category,
-      status: r.status, severity: r.severity, onset_date: r.onset_date, managing_provider: r.managing_provider, is_primary: r.is_primary,
-      note_count: ns.length, last_note_date: ns.map((n) => n.note_date).sort().pop() || null };
-  });
-  return { status: 200, total_conditions: all.length, active_count: active.length,
-    by_status: count("status").sort((a, b) => a.status.localeCompare(b.status)),
-    by_category: count("category").sort((a, b) => b.count - a.count), active_conditions: active };
-}
-
-module.exports = { list, getById, create: createCondition, update, remove, notes, addNote, setTarget, summary };
+// the rules and row shapes below are also used by access.js (the browser saves these 3 classes directly with the same rules)
+module.exports = { list, create: createCondition, addNote, setTarget,
+  validate, row, noteRow, targetRow, text, dateOnly, FIELDS, NOTE_FIELDS, TARGET_FIELDS, NOTE_TYPES };

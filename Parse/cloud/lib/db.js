@@ -55,6 +55,29 @@ async function findOne(className, where = {}, opts = {}) {
   return rows[0] || null;
 }
 
+// "One row per user" classes (MedicalRecord, EmergencyProfile, NotificationPrefs): the row that counts is the OLDEST one
+// (createdAt, then objectId), the same row keepOldest() keeps.
+const byAge = (a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+async function oldestRow(className, userId, opts = {}) {
+  const rows = await findAll(className, { user_id: userId }, { ...opts, ascending: "createdAt", limit: 2 });
+  return rows.sort(byAge)[0] || null;
+}
+// After a browser CREATE in a one-row-per-user class: two creates at the same moment can both pass the beforeSave
+// "already saved" check, so the extra rows are removed again here and the oldest is kept (every save that runs this
+// picks the same one). Each removed row is audited (DELETE, detail.duplicate_of). Returns the kept row.
+async function keepOldest(className, userId, { ip = null, row } = {}) {
+  const rows = (await findAll(className, { user_id: userId })).sort(byAge);
+  if (rows.length < 2) return rows[0] || null;
+  const [keep, ...extra] = rows;
+  for (const o of extra) {
+    // another save's afterSave may be removing the same duplicate at the same moment: "not found" means it is gone already
+    try { await o.destroy(M); }
+    catch (err) { if (err && err.code === Parse.Error.OBJECT_NOT_FOUND) continue; throw err; }
+    await audit({ userId, event: "DELETE", targetClass: className, targetId: o.id, oldData: row ? row(o) : null, ip, detail: { duplicate_of: keep.id } });
+  }
+  return keep;
+}
+
 // One object by id, only if it belongs to `userId`
 async function getOwned(className, id, userId, opts = {}) {
   if (!isId(id)) return null;
@@ -115,4 +138,4 @@ const maxDate = () => new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().s
 // Error reply in the {status, error} shape the website expects
 const fail = (status, error) => ({ status, error });
 
-module.exports = { M, isId, isDate, isDateTime, today, toRow, findAll, findOne, getOwned, save, create, destroy, destroyAll, audit, param, optText, maxDate, fail };
+module.exports = { M, isId, isDate, isDateTime, today, toRow, findAll, findOne, oldestRow, keepOldest, getOwned, save, create, destroy, destroyAll, audit, param, optText, maxDate, fail };

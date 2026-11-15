@@ -1,56 +1,52 @@
-// router.js — the `api` Cloud Function: one entry point with the same paths the old
-// Node server had, so the website's pages didn't need to change.
+// router.js — the `api` Cloud Function: one entry point for what must run on the server.
 //
-//   Parse.Cloud.run("api", { method: "GET", path: "/medications", query: {...}, body: {...} })
+//   Parse.Cloud.run("api", { method: "GET", path: "/calendar/feed-tokens", query: {...}, body: {...} })
 //
 // Returns { status, ...payload } (status 4xx/5xx = error, with `error` explaining it).
-// Patient-data routes are for patient accounts only; physicians read patient data through
-// share codes (read-only) and never through these.
+// Every account is a patient (there are no physician accounts); patient-data routes still refuse any other role.
+// Other people see a patient's data only through a sharing code (read-only) or the emergency code.
+//
+// Only these stay here, because each needs a server secret, another user's data, the drug reference, a locked class
+// or the master key: login / 2FA / password reset, /me, the account (export, deletion, terms), share codes and the
+// shared view, the emergency code / its access log / the responder view, calendar subscribe links, the USDA food
+// search, documents (encrypted files) and the PDF auto-fill, lab PDF reports (encrypted), the medication safety
+// check / recheck (they write SafetyAlert rows), the C-CDA import and the notification sweep (it writes Notification
+// rows). Everything else (the setup.js OWNER_CLASSES) is read and written by the website with the Parse SDK
+// (Vite/src/data/*.ts), guarded per class by the RULES in access.js.
 
 const auth = require("./auth");
 const records = require("./records");
-const medications = require("./medications");
-const vitals = require("./vitals");
-const diary = require("./diary");
-const conditions = require("./conditions");
-const calendar = require("./calendar");
+const vitals = require("./vitals");   // only for the shared view (records.openShared: the vitals summary)
 const calendarFeed = require("./calendarFeed");
 const nutrition = require("./nutrition");
 const labs = require("./labs");
 const safety = require("./safety");
-const links = require("./links");
-const disposal = require("./disposal");
 const documents = require("./documents");
-const respiratory = require("./respiratory");
-const reminders = require("./reminders");
 const notifications = require("./notifications");
 const ccdaApi = require("./ccdaApi");
 const emergency = require("./emergency");
 const autofill = require("./autofill");
-const previsit = require("./previsit");
 const account = require("./account");
 
-const PATIENT_ONLY = ["records", "share", "medications", "diary-entries", "vitals", "conditions", "calendar", "nutrition", "labs", "safety", "links",
-  "disposal", "documents", "respiratory", "reminders", "notifications", "emergency", "previsit"];
+const PATIENT_ONLY = ["share", "calendar", "nutrition", "labs", "safety", "documents", "notifications", "emergency"];
 const notFound = () => ({ status: 404, error: "unknown endpoint" });
-const hooks = { afterRecordSaved: (userId, data) => safety.syncAllergiesFromRecord(userId, data) };
 
 async function route({ method, path, query, body }, ctx) {
   const m = String(method || "GET").toUpperCase();
   const p = String(path || "").split("?")[0];
-  const parts = p.split("/").filter(Boolean);   // ["medications", id?, sub?]
+  const parts = p.split("/").filter(Boolean);   // ["calendar", id?, sub?]
   const [section, id, sub, extra] = parts;
   body = body && typeof body === "object" && !Array.isArray(body) ? body : {};
   query = query && typeof query === "object" ? query : {};
 
   // ---- no login needed ----
-  if (m === "POST" && p === "/register") return auth.register(body, ctx);
+  // (sign-up is Parse's own signUp from the Register page, checked by auth.beforeSaveUser; there is no /register here)
   if (m === "POST" && p === "/login") return auth.login(body, ctx);
   if (m === "POST" && p === "/verify-2fa") return auth.verify2fa(body, ctx);
   if (m === "POST" && p === "/forget") return auth.forget(body, ctx);
   if (m === "POST" && p === "/reset") return auth.reset(body, ctx);
   if (m === "POST" && p === "/logout") return auth.logout(ctx);
-  // provider codes check the physician login inside; family codes need none
+  // sharing codes need no login (an old provider code is refused inside)
   if (m === "POST" && section === "shared" && id && parts.length === 2) return records.openShared(id, body, ctx.user, ctx, { vitals });
 
   // emergency responders have no account; the code is the key (rate-limited, logged, and the patient is told)
@@ -64,13 +60,11 @@ async function route({ method, path, query, body }, ctx) {
   const user = ctx.user;
   if (!user) return { status: 401, error: "authentication required" };
   if (m === "GET" && p === "/me") return auth.me(user);
-  // /records has no sub-paths; answer 404 for every role (a physician would otherwise get the patient-only 403)
-  if (section === "records" && parts.length > 1) return notFound();
   if (PATIENT_ONLY.includes(section) && user.role !== "patient") {
-    return { status: 403, error: "this is for patient accounts; physicians view patients through a sharing code" };
+    return { status: 403, error: "this is for patient accounts" };
   }
 
-  // the account itself: any role (a physician can export or delete their own login too)
+  // the account itself: any role (an account can always export or delete its own login)
   if (section === "account") {
     if (parts.length === 2 && id === "export" && m === "POST") return account.exportData(body, user, ctx);
     if (parts.length === 2 && id === "accept-terms" && m === "POST") return account.acceptTerms(body, user, ctx);
@@ -83,124 +77,29 @@ async function route({ method, path, query, body }, ctx) {
   }
 
   switch (section) {
-    case "records":
-      if (parts.length === 1 && m === "GET") return records.getRecord(user);
-      if (parts.length === 1 && m === "PUT") return records.putRecord(body, user, ctx, hooks);
-      return notFound();
-
     case "share":
+      // share codes link to this patient's data for someone without an account
       if (parts.length === 1 && m === "POST") return records.createShare(body, user, ctx);
       if (parts.length === 1 && m === "GET") return records.listShares(user);
       if (id === "access-log" && parts.length === 2 && m === "GET") return records.listAccessLog(user);
       if (id && parts.length === 2 && m === "DELETE") return records.revokeShare(id, user, ctx);
       return notFound();
 
-    case "medications":
-      if (parts.length > 3) return notFound();
-      if (!id) {
-        if (m === "GET") return medications.list(query, user);
-        if (m === "POST") return medications.create(body, user);
-      } else if (id === "summary" && !sub) {
-        if (m === "GET") return medications.summary(user);
-      } else if (!sub) {
-        if (m === "GET") return medications.getById(id, user);
-        if (m === "PUT") return medications.update(id, body, user);
-        if (m === "DELETE") return medications.remove(id, user);
-      } else if (sub === "doses") {
-        if (m === "GET") return medications.getDoses(id, query, user);
-        if (m === "POST") return medications.logDose(id, body, user);
-      } else if (sub === "refills") {
-        if (m === "GET") return medications.getRefills(id, user);
-        if (m === "POST") return medications.addRefill(id, body, user);
-      }
-      return notFound();
-
-    case "diary-entries":
-      if (parts.length > 2) return notFound();
-      if (!id && m === "GET") return diary.list(user);
-      if (!id && m === "POST") return diary.create(body, user);
-      if (id && m === "GET") return diary.getById(id, user);
-      if (id && m === "PUT") return diary.update(id, body, user);
-      if (id && m === "DELETE") return diary.remove(id, user);
-      return notFound();
-
-    case "vitals":
-      if (parts.length > 2) return notFound();
-      if (!id && m === "GET") return vitals.list(query, user);
-      if (!id && m === "POST") return vitals.create(body, user);
-      if (id === "types" && m === "GET") return vitals.types();
-      if (id === "summary" && m === "GET") return vitals.summary(user);
-      if (id === "trends" && m === "GET") return vitals.trends(query, user);
-      if (id === "quick-look" && m === "GET") return vitals.quickLook(query, user);
-      if (id && m === "GET") return vitals.getById(id, user);
-      if (id && m === "PUT") return vitals.update(id, body, user);
-      if (id && m === "DELETE") return vitals.remove(id, user);
-      return notFound();
-
-    case "conditions":
-      if (parts.length > 3) return notFound();
-      if (!id) {
-        if (m === "GET") return conditions.list(query, user);
-        if (m === "POST") return conditions.create(body, user);
-      } else if (id === "summary" && !sub) {
-        if (m === "GET") return conditions.summary(user);
-      } else if (!sub) {
-        if (m === "GET") return conditions.getById(id, user);
-        if (m === "PUT") return conditions.update(id, body, user);
-        if (m === "DELETE") return conditions.remove(id, user);
-      } else if (sub === "notes") {
-        if (m === "GET") return conditions.notes(id, user);
-        if (m === "POST") return conditions.addNote(id, body, user);
-      } else if (sub === "targets") {
-        if (m === "POST") return conditions.setTarget(id, body, user);
-      }
-      return notFound();
-
     case "calendar":
-      // /calendar/events/:id/occurrences/:date — five parts, so it sits outside the <= 4 block below
-      if (id === "events" && extra === "occurrences" && parts.length === 5 && m === "DELETE") {
-        return calendar.skipOccurrence(sub, parts[4], user, ctx);
-      }
-      if (id === "events" && parts.length <= 4) {
-        if (!sub) {
-          if (m === "GET") return calendar.list(query, user);
-          if (m === "POST") return calendar.create(body, user);
-        } else if (!extra) {
-          if (m === "GET") return calendar.getById(sub, user);
-          if (m === "PUT") return calendar.update(sub, body, user);
-          if (m === "DELETE") return calendar.remove(sub, user);
-        } else if (extra === "ics" && m === "GET") return calendar.eventIcs(sub, user);
-      }
-      if (id === "upcoming" && parts.length === 2 && m === "GET") return calendar.upcoming(query, user);
-      if (id === "ics" && parts.length === 2 && m === "GET") return calendar.calendarIcs(user);
-      // subscribe links (D-016); the feed itself is a plain web route, not part of api (see calendarFeed.js)
+      // only the subscribe links (D-016); the feed itself is a plain web route, not part of api (see calendarFeed.js)
       if (id === "feed-tokens" && parts.length === 2 && m === "GET") return calendarFeed.listTokens(user);
       if (id === "feed-tokens" && parts.length === 2 && m === "POST") return calendarFeed.createToken(body, user, ctx);
       if (id === "feed-tokens" && parts.length === 3 && m === "DELETE") return calendarFeed.revokeToken(sub, user, ctx);
       return notFound();
 
     case "nutrition":
+      // only the USDA search (it needs the server's USDA key)
       if (id === "search" && !sub && m === "POST") return nutrition.search(body);
-      if (id === "logs" && !sub && m === "GET") return nutrition.logs(query, user);
-      if (id === "summary" && !sub && m === "GET") return nutrition.summary(query, user);
-      if (id === "log" && parts.length <= 3) {
-        if (!sub && m === "POST") return nutrition.log(body, user);
-        if (sub && m === "PUT") return nutrition.update(sub, body, user);
-        if (sub && m === "DELETE") return nutrition.remove(sub, user);
-      }
       return notFound();
 
     case "labs":
+      // only the PDF reports (stored encrypted)
       if (parts.length > 4) return notFound();
-      if (id === "catalog" && !sub && m === "GET") return labs.getCatalog();
-      if (id === "summary" && !sub && m === "GET") return labs.summary(user);
-      if (id === "results" && !extra) {
-        if (!sub && m === "GET") return labs.listResults(query, user);
-        if (!sub && m === "POST") return labs.createResults(body, user);
-        if (sub && m === "GET") return labs.getResult(sub, user);
-        if (sub && m === "PUT") return labs.updateResult(sub, body, user);
-        if (sub && m === "DELETE") return labs.deleteResult(sub, user);
-      }
       if (id === "reports") {
         if (!sub && m === "GET") return labs.listReports(user);
         if (!sub && m === "POST") return labs.uploadReport({ ...query, ...body }, user);
@@ -212,35 +111,13 @@ async function route({ method, path, query, body }, ctx) {
       return notFound();
 
     case "safety":
-      if (id === "allergies" && !sub && m === "GET") return safety.getAllergies(user);
-      if (id === "alerts" && !sub && m === "GET") return safety.getAlerts(user);
+      // the checks against the drug reference (they write SafetyAlert rows, which only the server may do)
+      if (id === "recheck" && !sub && m === "POST") return safety.recheck(user);
       if (id === "check" && !sub && m === "POST") return safety.check(body, user);
-      if (id === "alerts" && sub && extra === "acknowledge" && parts.length === 4 && m === "POST") return safety.acknowledge(sub, body, user);
-      return notFound();
-
-    case "links":
-      if (parts.length > 3) return notFound();
-      if (!id && m === "GET") return links.list(query, user);
-      if (!id && m === "POST") return links.create(body, user);
-      if (id && !sub && m === "GET") return links.getById(id, user);
-      if (id && !sub && m === "PUT") return links.update(id, body, user);
-      if (id && !sub && m === "DELETE") return links.remove(id, user);
-      if (id && sub === "opened" && m === "POST") return links.opened(id, user);
-      return notFound();
-
-    case "disposal":
-      if (id === "methods" && !sub && m === "GET") return disposal.methods();
-      if (id === "guidance" && !sub && m === "GET") return disposal.guidance(query);
-      if (id === "due" && !sub && m === "GET") return disposal.due(user);
-      if (id === "logs" && !extra) {
-        if (!sub && m === "GET") return disposal.listLogs(user);
-        if (!sub && m === "POST") return disposal.createLog(body, user, ctx);
-        if (sub && m === "DELETE") return disposal.removeLog(sub, user, ctx);
-      }
       return notFound();
 
     case "documents":
-      // PDF auto-fill (7-2): "autofill" is checked first so it is never read as a document id
+      // encrypted files. PDF auto-fill (7-2): "autofill" is checked first so it is never read as a document id
       if (id === "autofill") {
         if (parts.length === 2 && m === "POST") return autofill.extract(body, user, ctx);
         if (parts.length === 3 && m === "GET") return autofill.getDraft(sub, user);
@@ -261,65 +138,14 @@ async function route({ method, path, query, body }, ctx) {
       }
       return notFound();
 
-    case "respiratory":
-      if (parts.length > 4) return notFound();
-      if (id === "summary" && !sub && m === "GET") return { status: 200, ...(await respiratory.summary(user)) };   // summary() returns only the sections
-      if (id === "devices") {
-        if (!sub) {
-          if (m === "GET") return respiratory.listDevices(user);
-          if (m === "POST") return respiratory.createDevice(body, user, ctx);
-        } else if (!extra) {
-          if (m === "GET") return respiratory.getDevice(sub, user);
-          if (m === "PUT") return respiratory.updateDevice(sub, body, user, ctx);
-          if (m === "DELETE") return respiratory.removeDevice(sub, user, ctx);
-        } else if (extra === "supplies" && parts.length === 4) {
-          if (m === "GET") return respiratory.listSupplies(sub, user);
-          if (m === "POST") return respiratory.addSupply(sub, body, user, ctx);
-        }
-      }
-      if (id === "supplies" && sub) {
-        if (!extra && m === "PUT") return respiratory.updateSupply(sub, body, user, ctx);
-        if (!extra && m === "DELETE") return respiratory.removeSupply(sub, user, ctx);
-        if (extra === "replaced" && m === "POST") return respiratory.markReplaced(sub, body, user, ctx);
-      }
-      if (id === "logs" && !extra) {
-        if (!sub && m === "GET") return respiratory.listLogs(query, user);
-        if (!sub && m === "POST") return respiratory.createLog(body, user, ctx);
-        if (sub && m === "PUT") return respiratory.updateLog(sub, body, user, ctx);
-        if (sub && m === "DELETE") return respiratory.removeLog(sub, user, ctx);
-      }
-      return notFound();
-
-    case "reminders":
-      if (parts.length > 3) return notFound();
-      if (!id) {
-        if (m === "GET") return reminders.list(user);
-        if (m === "POST") return reminders.create(body, user, ctx);
-      } else if (!sub) {
-        if (m === "GET") return reminders.get(id, user);
-        if (m === "PUT") return reminders.update(id, body, user, ctx);
-        if (m === "DELETE") return reminders.remove(id, user, ctx);
-      } else if (sub === "snooze" && m === "POST") {
-        return reminders.snooze(id, body.minutes, user, ctx);
-      }
-      return notFound();
-      
     case "emergency":
-      if (parts.length === 2 && id === "settings") {
-        if (m === "GET") return emergency.getSettings(user);
-        if (m === "PUT") return emergency.putSettings(body, user, ctx);
-      }
-      if (parts.length === 2 && id === "preview" && m === "GET") return emergency.preview(user);
+      // only the code (EmergencyAccess stays locked) and the access log; the responder view is /emergency-access above
       if (parts.length === 2 && id === "code") {
+        if (m === "GET") return emergency.codeStatus(user);
         if (m === "POST") return emergency.createCode(user, ctx);
         if (m === "DELETE") return emergency.revokeCode(user, ctx);
       }
       if (parts.length === 2 && id === "access-log" && m === "GET") return emergency.accessLog(user);
-      return notFound();
-
-    case "previsit":
-      if (parts.length === 2 && id === "appointments" && m === "GET") return previsit.appointments(query, user);
-      if (parts.length === 2 && id === "summary" && m === "POST") return previsit.summary(body, user, ctx);
       return notFound();
 
     case "ccda":
@@ -327,21 +153,10 @@ async function route({ method, path, query, body }, ctx) {
       if (id === "preview") return ccdaApi.preview(body, user, ctx);
       if (id === "import") return ccdaApi.importSelected(body, user, ctx);
       return notFound();
-      
+
     case "notifications":
-      if (parts.length > 3) return notFound();
-      if (!id) {
-        if (m === "GET") return notifications.list(user);
-        if (m === "DELETE") return notifications.clearRead(user);
-      } else if (!sub) {
-        if (id === "count") return m === "GET" ? notifications.count(user) : notFound();   // "count" is not an ID, so DELETE is not "invalid ID"
-        if (id === "read-all" && m === "POST") return notifications.readAll(user);
-        if (id === "settings" && m === "GET") return notifications.getSettings(user);
-        if (id === "settings" && m === "PUT") return notifications.putSettings(body, user);
-        if (m === "DELETE") return notifications.dismiss(id, user);
-      } else if (sub === "read" && m === "POST") {
-        return notifications.markRead(id, user);
-      }
+      // only the sweep (it creates Notification rows, which only the server may do)
+      if (id === "sweep" && parts.length === 2 && m === "POST") return notifications.sweep(user);
       return notFound();
   }
   return notFound();

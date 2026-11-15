@@ -1,23 +1,14 @@
-// respiratory.js — Breathing devices and their replaceable parts (Task 2.1).
-//   GET    /respiratory/devices                  the user's devices
-//   POST   /respiratory/devices                  add a device; the default parts schedule is created with it
-//   GET    /respiratory/devices/:id              one device with its parts
-//   PUT    /respiratory/devices/:id              change a device's name, serial, mask or settings
-//   DELETE /respiratory/devices/:id              remove a device, its parts and its entries
-//   GET    /respiratory/devices/:id/supplies     parts to replace on a device
-//   POST   /respiratory/devices/:id/supplies     add a part
-//   PUT    /respiratory/supplies/:id             change a part
-//   DELETE /respiratory/supplies/:id             remove a part
-//   POST   /respiratory/supplies/:id/replaced    mark a part replaced (today, or a past date)
-// Every part sent to the app carries next_due, days_left and due_status (overdue | due_soon | ok), see supplyStatus (Task 2.2).
-//   GET    /respiratory/logs                     daily/nightly entries (?device_id=&from=&to=&limit=), newest first
-//   POST   /respiratory/logs                     add an entry
-//   PUT    /respiratory/logs/:id                 change an entry
-//   DELETE /respiratory/logs/:id                 remove an entry
-//   GET    /respiratory/summary                  last 30 days: PAP use, oxygen, peak flow zone, parts due (Task 2.4)
-// Classes: RespiratoryDevice, DeviceSupply, RespiratoryLog (log rows are also removed with their device)
+// respiratory.js — Breathing devices, their replaceable parts and daily/nightly entries (Tasks 2.1–2.4), on Parse.
+// Classes: RespiratoryDevice, DeviceSupply, RespiratoryLog (parts and entries have device_id; they go with their device).
+// The Breathing Devices page reads and saves all three with the Parse SDK (Vite/src/data/respiratory.ts: devices, parts
+// with their due status, entries, the 30-day summary). The owner-only rules in access.js (RULES.RespiratoryDevice /
+// DeviceSupply / RespiratoryLog) use the field rules here: deviceProblem/deviceValues, supplyProblem/supplyValues,
+// logProblem/logValues, and afterDeviceSave (a new device gets its default parts list). There is no /respiratory api
+// route any more. "Mark replaced" is a browser update of last_replaced.
+// Still used on the server: createDevice and createLog (seed), supplyRow and supplyStatus (notifications: parts due).
+// Every part shown carries next_due, days_left and due_status (overdue | due_soon | ok), see supplyStatus (Task 2.2).
 
-const { isId, isDate, today, toRow, findAll, getOwned, save, create, destroy, audit, optText, maxDate, param, fail } = require("./db");
+const { isId, isDate, today, toRow, findAll, getOwned, create, audit, optText, maxDate, fail } = require("./db");
 
 // The eight kinds of device, exactly as the spec lists them. "cpap", "apap" and "bipap" are pressure (PAP) machines.
 const DEVICE_TYPES = ["cpap", "apap", "bipap", "oxygen_concentrator", "portable_oxygen", "nebulizer", "peak_flow_meter", "other"];
@@ -83,9 +74,8 @@ function supplyStatus(supply, todayDate = today()) {
   const dueStatus = daysLeft < 0 ? "overdue" : daysLeft <= DUE_SOON_DAYS ? "due_soon" : "ok";
   return { next_due: new Date(dueMs).toISOString().slice(0, 10), days_left: daysLeft, due_status: dueStatus };
 }
-// A part as sent to the app: its stored fields plus the status. Audit rows keep the stored fields only.
+// A part with its due status (createDevice). Audit rows keep the stored fields only.
 const withStatus = (row) => ({ ...row, ...supplyStatus(row) });
-const supplyView = (o) => withStatus(supplyRow(o));
 
 const has = (body, k) => Object.prototype.hasOwnProperty.call(body, k);
 const blank = (v) => v === undefined || v === null || v === "";
@@ -168,30 +158,14 @@ function readDeviceFields(body, current) {
   return { values: out };
 }
 
-// Used by every supply route: the device must exist and belong to the caller
+// createLog: the device must exist and belong to the caller
 async function ownedDevice(id, user) {
   if (!isId(id)) return { res: fail(400, "Invalid device ID") };
   const device = await getOwned("RespiratoryDevice", id, user.user_id);
   if (!device) return { res: fail(404, "Device not found") };
   return { device };
 }
-async function ownedSupply(id, user) {
-  if (!isId(id)) return { res: fail(400, "Invalid part ID") };
-  const supply = await getOwned("DeviceSupply", id, user.user_id);
-  if (!supply) return { res: fail(404, "Part not found") };
-  return { supply };
-}
-
-const supplyList = async (deviceId, user) =>
-  (await findAll("DeviceSupply", { user_id: user.user_id, device_id: deviceId }, { ascending: "createdAt" })).map(supplyView);
-
-// GET /respiratory/devices
-async function listDevices(user) {
-  const devices = await findAll("RespiratoryDevice", { user_id: user.user_id }, { ascending: "createdAt" });
-  return { status: 200, devices: devices.map(deviceRow) };
-}
-
-// POST /respiratory/devices {device_type, name?, serial_last4?, mask_type?, start_date?, notes?, settings...}
+// A device made by the server (seed; the website saves through the Parse SDK) {device_type, name?, serial_last4?, ...}
 async function createDevice(body, user, ctx) {
   body = body || {};
   if (!DEVICE_TYPES.includes(body.device_type)) return fail(400, `Device type must be one of: ${DEVICE_TYPES.join(", ")}`);
@@ -208,73 +182,21 @@ async function createDevice(body, user, ctx) {
   const row = deviceRow(device);
   await audit({ userId: user.user_id, event: "INSERT", targetClass: "RespiratoryDevice", targetId: device.id, newData: row, ip: ctx.ip });
 
-  // The replacement clock starts today: the app can't know when earlier parts were last changed.
-  const supplies = [];
-  for (const s of DEFAULT_SUPPLIES[body.device_type]) {
-    const supply = await create("DeviceSupply", { user_id: user.user_id, device_id: device.id, part_name: s.part_name, interval_days: s.interval_days, last_replaced: today() });
-    const srow = supplyRow(supply);
-    await audit({ userId: user.user_id, event: "INSERT", targetClass: "DeviceSupply", targetId: supply.id, newData: srow, ip: ctx.ip });
-    supplies.push(withStatus(srow));
-  }
+  const supplies = await addDefaultSupplies(device, user.user_id, ctx.ip);
   return { status: 201, message: "Device added", device: row, supplies };
 }
 
-// GET /respiratory/devices/:id
-async function getDevice(id, user) {
-  const { device, res } = await ownedDevice(id, user);
-  if (res) return res;
-  return { status: 200, device: deviceRow(device), supplies: await supplyList(device.id, user) };
-}
-
-// PUT /respiratory/devices/:id — only the fields sent change; the device type can't
-async function updateDevice(id, body, user, ctx) {
-  body = body || {};
-  const { device, res } = await ownedDevice(id, user);
-  if (res) return res;
-  if (has(body, "device_type") && body.device_type !== device.get("device_type")) {
-    return fail(400, "A device's type can't be changed. Add a new device instead");
+// The default parts list for a new device (DEFAULT_SUPPLIES), each audited. The replacement clock starts today: the
+// app can't know when earlier parts were last changed. Used by createDevice and by a browser create (afterDeviceSave).
+async function addDefaultSupplies(device, userId, ip) {
+  const supplies = [];
+  for (const s of DEFAULT_SUPPLIES[device.get("device_type")] || []) {
+    const supply = await create("DeviceSupply", { user_id: userId, device_id: device.id, part_name: s.part_name, interval_days: s.interval_days, last_replaced: today() });
+    const srow = supplyRow(supply);
+    await audit({ userId, event: "INSERT", targetClass: "DeviceSupply", targetId: supply.id, newData: srow, ip });
+    supplies.push(withStatus(srow));
   }
-  const oldData = deviceRow(device);
-  const fields = readDeviceFields(body, oldData);
-  if (fields.error) return fail(400, fields.error);
-  if (has(fields.values, "name") && !fields.values.name) fields.values.name = TYPE_LABEL[oldData.device_type];
-  await save(device, fields.values);
-  const newData = deviceRow(device);
-  await audit({ userId: user.user_id, event: "UPDATE", targetClass: "RespiratoryDevice", targetId: device.id, oldData, newData, ip: ctx.ip });
-  return { status: 200, message: "Device updated", device: newData };
-}
-
-// DELETE /respiratory/devices/:id — also removes the device's parts and daily entries
-async function removeDevice(id, user, ctx) {
-  const { device, res } = await ownedDevice(id, user);
-  if (res) return res;
-  const oldData = deviceRow(device);
-
-  const supplies = await findAll("DeviceSupply", { user_id: user.user_id, device_id: device.id });
-  for (const s of supplies) {
-    const srow = supplyRow(s);
-    await destroy(s);
-    await audit({ userId: user.user_id, event: "DELETE", targetClass: "DeviceSupply", targetId: s.id, oldData: srow, ip: ctx.ip });
-  }
-  // findAll returns at most 10,000 rows (db.js MAX_ROWS); a device with more entries than that would need paging (backlog)
-  const logs = await findAll("RespiratoryLog", { user_id: user.user_id, device_id: device.id });
-  for (const l of logs) {
-    const lrow = logRow(l);
-    await destroy(l);
-    await audit({ userId: user.user_id, event: "DELETE", targetClass: "RespiratoryLog", targetId: l.id, oldData: lrow, ip: ctx.ip });
-  }
-
-  await destroy(device);
-  await audit({ userId: user.user_id, event: "DELETE", targetClass: "RespiratoryDevice", targetId: id, oldData, ip: ctx.ip,
-    detail: `Also removed ${supplies.length} parts and ${logs.length} entries` });
-  return { status: 200, message: "Device removed" };
-}
-
-// GET /respiratory/devices/:id/supplies
-async function listSupplies(deviceId, user) {
-  const { device, res } = await ownedDevice(deviceId, user);
-  if (res) return res;
-  return { status: 200, supplies: await supplyList(device.id, user) };
+  return supplies;
 }
 
 // Part fields from a request. On create both name and interval are required.
@@ -303,60 +225,6 @@ function readSupplyFields(body, isNew) {
     out.notes = notes.value;
   }
   return { values: out };
-}
-
-// POST /respiratory/devices/:id/supplies {part_name, interval_days, last_replaced?, notes?}
-async function addSupply(deviceId, body, user, ctx) {
-  body = body || {};
-  const { device, res } = await ownedDevice(deviceId, user);
-  if (res) return res;
-  const fields = readSupplyFields(body, true);
-  if (fields.error) return fail(400, fields.error);
-  const supply = await create("DeviceSupply", {
-    user_id: user.user_id, device_id: device.id, last_replaced: today(), ...fields.values,
-  });
-  const row = supplyRow(supply);
-  await audit({ userId: user.user_id, event: "INSERT", targetClass: "DeviceSupply", targetId: supply.id, newData: row, ip: ctx.ip });
-  return { status: 201, message: "Part added", supply: withStatus(row) };
-}
-
-// PUT /respiratory/supplies/:id
-async function updateSupply(id, body, user, ctx) {
-  body = body || {};
-  const { supply, res } = await ownedSupply(id, user);
-  if (res) return res;
-  const fields = readSupplyFields(body, false);
-  if (fields.error) return fail(400, fields.error);
-  const oldData = supplyRow(supply);
-  await save(supply, fields.values);
-  const newData = supplyRow(supply);
-  await audit({ userId: user.user_id, event: "UPDATE", targetClass: "DeviceSupply", targetId: supply.id, oldData, newData, ip: ctx.ip });
-  return { status: 200, message: "Part updated", supply: withStatus(newData) };
-}
-
-// DELETE /respiratory/supplies/:id
-async function removeSupply(id, user, ctx) {
-  const { supply, res } = await ownedSupply(id, user);
-  if (res) return res;
-  const oldData = supplyRow(supply);
-  await destroy(supply);
-  await audit({ userId: user.user_id, event: "DELETE", targetClass: "DeviceSupply", targetId: id, oldData, ip: ctx.ip });
-  return { status: 200, message: "Part removed" };
-}
-
-// POST /respiratory/supplies/:id/replaced {date?} — date defaults to today and can't be in the future
-async function markReplaced(id, body, user, ctx) {
-  body = body || {};
-  const { supply, res } = await ownedSupply(id, user);
-  if (res) return res;
-  const date = blank(body.date) ? today() : body.date;
-  if (!isDate(date)) return fail(400, "Use the date format YYYY-MM-DD");
-  if (date > maxDate()) return fail(400, "The replacement date can't be in the future");
-  const oldData = supplyRow(supply);
-  await save(supply, { last_replaced: date });
-  const newData = supplyRow(supply);
-  await audit({ userId: user.user_id, event: "UPDATE", targetClass: "DeviceSupply", targetId: supply.id, oldData, newData, ip: ctx.ip });
-  return { status: 200, message: "Part marked as replaced", supply: withStatus(newData) };
 }
 
 // --- Logs (Task 2.3) -------------------------------------------------------------------------
@@ -423,35 +291,7 @@ async function nightTaken(user, deviceId, date, exceptId) {
 }
 const TAKEN = "There is already an entry for that night on this device. Edit it instead";
 
-async function ownedLog(id, user) {
-  if (!isId(id)) return { res: fail(400, "Invalid entry ID") };
-  const log = await getOwned("RespiratoryLog", id, user.user_id);
-  if (!log) return { res: fail(404, "Entry not found") };
-  return { log };
-}
-
-// GET /respiratory/logs?device_id=&from=&to=&limit= — newest night first
-async function listLogs(query, user) {
-  const deviceId = param(query, "device_id"), from = param(query, "from"), to = param(query, "to"), limitRaw = param(query, "limit");
-  if (deviceId && !isId(deviceId)) return fail(400, "Invalid device ID");
-  if (from && !isDate(from)) return fail(400, "from must be a date in the format YYYY-MM-DD");
-  if (to && !isDate(to)) return fail(400, "to must be a date in the format YYYY-MM-DD");
-  if (from && to && to < from) return fail(400, "to cannot be before from");
-  let limit = 500;
-  if (limitRaw != null) {
-    limit = plainNumber(limitRaw);
-    if (!Number.isInteger(limit) || limit < 1 || limit > 1000) return fail(400, "limit must be between 1 and 1000");
-  }
-  const where = { user_id: user.user_id };
-  if (deviceId) where.device_id = deviceId;
-  let logs = (await findAll("RespiratoryLog", where, { descending: "log_date" })).map(logRow);
-  if (from) logs = logs.filter((l) => l.log_date >= from);
-  if (to) logs = logs.filter((l) => l.log_date <= to);
-  logs = logs.slice(0, limit);
-  return { status: 200, logs, count: logs.length };
-}
-
-// POST /respiratory/logs {device_id, log_date, readings..., notes?}
+// An entry made by the server (seed; the website saves through the Parse SDK) {device_id, log_date, readings..., notes?}
 async function createLog(body, user, ctx) {
   if (!body || typeof body !== "object") return fail(400, "Missing entry details");
   const { device, res } = await ownedDevice(body.device_id, user);
@@ -469,173 +309,70 @@ async function createLog(body, user, ctx) {
   return { status: 201, message: "Entry added", log: row };
 }
 
-// PUT /respiratory/logs/:id — only the fields sent change; the device can't
-async function updateLog(id, body, user, ctx) {
-  body = body || {};
-  const { log, res } = await ownedLog(id, user);
-  if (res) return res;
-  if (has(body, "device_id") && body.device_id !== log.get("device_id")) {
-    return fail(400, "An entry can't be moved to another device. Add a new entry instead");
+// --- Browser saves (access.js RULES; the values are already type-checked: numbers are numbers, text is text) ---
+// body = the fields sent (a removed field is null); original = the stored row on an edit, else null.
+
+// RespiratoryDevice: createDevice() / the old PUT /respiratory/devices/:id rules
+function deviceProblem(body, original) {
+  if (!original) {
+    if (!DEVICE_TYPES.includes(body.device_type)) return `Device type must be one of: ${DEVICE_TYPES.join(", ")}`;
+  } else if (has(body, "device_type") && body.device_type !== original.get("device_type")) {
+    return "A device's type can't be changed. Add a new device instead";
   }
-  const oldData = logRow(log);
-  const fields = readLogFields(body, oldData);
-  if (fields.error) return fail(400, fields.error);
-  // Nothing different from what is stored: no save and no audit row
-  if (Object.entries(fields.values).every(([k, v]) => v === oldData[k])) return { status: 200, message: "Entry updated", log: oldData };
-  if (has(fields.values, "log_date") && fields.values.log_date !== oldData.log_date) {
-    const device = await getOwned("RespiratoryDevice", oldData.device_id, user.user_id);
-    if (device && PAP_TYPES.includes(device.get("device_type")) && await nightTaken(user, oldData.device_id, fields.values.log_date, log.id)) {
-      return fail(409, TAKEN);
-    }
+  return readDeviceFields(body, original ? deviceRow(original) : {}).error || null;
+}
+// the values to store: a new device is active and gets the type's name when none is given (an edit that clears the
+// name gets it back); the serial number keeps its last 6 characters
+function deviceValues(body, original) {
+  const { values } = readDeviceFields(body, original ? deviceRow(original) : {});
+  if (!original) return { device_type: body.device_type, is_active: true, ...values, name: values.name || TYPE_LABEL[body.device_type] };
+  if (has(values, "name") && !values.name) values.name = TYPE_LABEL[original.get("device_type")];
+  return values;
+}
+// a new device gets its default parts list (master key, audited), as createDevice did
+async function afterDeviceSave(device, { original, ip }) {
+  if (!original) await addDefaultSupplies(device, device.get("user_id"), ip);
+}
+
+// DeviceSupply: the old POST /respiratory/devices/:id/supplies, PUT /respiratory/supplies/:id and
+// POST /respiratory/supplies/:id/replaced rules ("replaced" = an edit of last_replaced: a date, not in the future)
+function supplyProblem(body, original) {
+  if (original && has(body, "device_id") && body.device_id !== original.get("device_id")) return "A part can't be moved to another device. Add a new part instead";
+  return readSupplyFields(body, !original).error || null;
+}
+// a new part's replacement clock starts today unless a date is given
+function supplyValues(body, original) {
+  const { values } = readSupplyFields(body, !original);
+  return original ? values : { device_id: body.device_id, last_replaced: today(), ...values };
+}
+
+// RespiratoryLog: createLog() / the old PUT /respiratory/logs/:id rules, with the one-entry-a-night rule for pressure
+// machines (the device type comes from the stored device row, never from the request)
+async function logProblem(body, { user, original }) {
+  if (!original) {
+    if (!isDate(body.log_date)) return "Use the date format YYYY-MM-DD for the date";
+  } else if (has(body, "device_id") && body.device_id !== original.get("device_id")) {
+    return "An entry can't be moved to another device. Add a new entry instead";
   }
-  await save(log, fields.values);
-  const newData = logRow(log);
-  await audit({ userId: user.user_id, event: "UPDATE", targetClass: "RespiratoryLog", targetId: log.id, oldData, newData, ip: ctx.ip });
-  return { status: 200, message: "Entry updated", log: newData };
-}
-
-// DELETE /respiratory/logs/:id
-async function removeLog(id, user, ctx) {
-  const { log, res } = await ownedLog(id, user);
-  if (res) return res;
-  const oldData = logRow(log);
-  await destroy(log);
-  await audit({ userId: user.user_id, event: "DELETE", targetClass: "RespiratoryLog", targetId: id, oldData, ip: ctx.ip });
-  return { status: 200, message: "Entry removed" };
-}
-
-// --- Summary (Task 2.4) ----------------------------------------------------------------------
-
-const SUMMARY_DAYS = 30;
-const PAP_NIGHT_HOURS = 4;        // a night counts when the machine ran at least this many hours
-const PAP_TARGET_NIGHTS = 21;     // 70% of 30 nights
-const AHI_LIMIT = 5;              // average AHI at or above this is flagged
-const LEAK_LIMIT = 24;            // average leak above this (L/min) is flagged
-const LOW_SPO2 = 88;
-// The app shows the reading, the percent of the person's own best and the colour. It does not interpret the reading or tell anyone what
-// medicine to use: that belongs to the asthma action plan their doctor gave them. (Task: keep this wording reviewed by a clinician.)
-const NO_PLAN = " If you do not have an asthma action plan, ask your doctor for one.";
-const PEAK_ZONES = {
-  green: "This reading is in your green range. Keep following the asthma action plan your doctor gave you." + NO_PLAN,
-  yellow: "This reading is in your yellow range. Follow the asthma action plan your doctor gave you for this range." + NO_PLAN,
-  red: "This reading is in your red range. Follow the asthma action plan your doctor gave you for this range. If you are struggling to breathe, call your local emergency number." + NO_PLAN,
-};
-
-const round1 = (n) => Math.round(n * 10) / 10;
-const mean = (values) => (values.length ? values.reduce((a, b) => a + b, 0) / values.length : null);
-const meanOrNull = (values) => { const m = mean(values); return m === null ? null : round1(m); };
-const numbers = (rows, field) => rows.map((r) => r[field]).filter((v) => typeof v === "number");
-
-// Last 30 days: `todayDate` and the 29 days before it
-function summaryWindow(todayDate) {
-  return { from: new Date(Date.parse(todayDate) - (SUMMARY_DAYS - 1) * DAY_MS).toISOString().slice(0, 10), to: todayDate };
-}
-
-// Pressure machines over the window. A night with no entry counts as 0 hours. With several PAP devices, a night's
-// hours are the most any one of them recorded, so a night is counted once. avg_hours is over the nights that have an entry.
-function papSummary(logs) {
-  const hoursByNight = new Map();
-  for (const l of logs) {
-    if (typeof l.hours_used !== "number") continue;
-    hoursByNight.set(l.log_date, Math.max(hoursByNight.get(l.log_date) ?? 0, l.hours_used));
+  const fields = readLogFields(body, original ? logRow(original) : {});
+  if (fields.error) return fields.error;
+  const date = fields.values.log_date;
+  if (date && (!original || date !== original.get("log_date"))) {
+    const deviceId = original ? original.get("device_id") : body.device_id;
+    // not the caller's device: access.js answers 101 (parent check) after this
+    const device = await getOwned("RespiratoryDevice", deviceId, user.id);
+    if (device && PAP_TYPES.includes(device.get("device_type")) && await nightTaken({ user_id: user.id }, deviceId, date, original ? original.id : null)) return TAKEN;
   }
-  const hours = [...hoursByNight.values()];
-  const nightsOk = hours.filter((h) => h >= PAP_NIGHT_HOURS).length;
-  const avgAhi = mean(numbers(logs, "ahi")), avgLeak = mean(numbers(logs, "leak_lpm"));
-  return {
-    days: SUMMARY_DAYS,
-    nights_logged: hours.length,
-    nights_ok: nightsOk,
-    percent: round1(nightsOk / SUMMARY_DAYS * 100),
-    compliant: nightsOk >= PAP_TARGET_NIGHTS,
-    nights_needed: Math.max(0, PAP_TARGET_NIGHTS - nightsOk),
-    avg_hours: meanOrNull(hours),
-    avg_ahi: avgAhi === null ? null : round1(avgAhi),
-    avg_leak: avgLeak === null ? null : round1(avgLeak),
-    ahi_high: avgAhi !== null && avgAhi >= AHI_LIMIT,
-    leak_high: avgLeak !== null && avgLeak > LEAK_LIMIT,
-  };
+  return null;
 }
-
-// Oxygen over the window. A day is below 88% when its spo2_min is under 88 (spo2_avg is not used for this count).
-function oxygenSummary(logs) {
-  const lowDays = new Set(logs.filter((l) => typeof l.spo2_min === "number" && l.spo2_min < LOW_SPO2).map((l) => l.log_date));
-  return {
-    days_logged: new Set(logs.map((l) => l.log_date)).size,
-    avg_hours: meanOrNull(numbers(logs, "hours_used")),
-    avg_flow_lpm: meanOrNull(numbers(logs, "flow_lpm_avg")),
-    avg_spo2: meanOrNull(numbers(logs, "spo2_avg")),
-    days_below_88: lowDays.size,
-  };
-}
-
-// Peak flow: best = the highest personal_best set on a peak flow meter, else the highest peak flow ever logged
-// (all dates, because a personal best doesn't expire). latest = the newest peak flow in the window.
-function peakFlowSummary(devices, windowLogs, allLogs) {
-  const set = devices.map((d) => d.personal_best).filter((v) => typeof v === "number");
-  const logged = numbers(allLogs, "peak_flow");
-  const best = set.length ? Math.max(...set) : logged.length ? Math.max(...logged) : null;
-  const latestLog = windowLogs.filter((l) => typeof l.peak_flow === "number")
-    .sort((a, b) => (a.log_date < b.log_date ? 1 : a.log_date > b.log_date ? -1 : 0))[0];
-  const out = {
-    personal_best: best,
-    personal_best_source: set.length ? "device" : logged.length ? "logged" : null,
-    latest: latestLog ? latestLog.peak_flow : null,
-    latest_date: latestLog ? latestLog.log_date : null,
-    percent_of_best: null, zone: null, advice: null,
-  };
-  if (best && latestLog) {
-    // The page shows this number, and the zone is read from the same number. It is cut (not rounded) to one decimal,
-    // so 79.96% shows as 79.9 and is yellow: a reading is never shown as, or put in, a better zone than it reached.
-    // (Whole tenths of a percent are counted as latest * 1000 / best; the tiny extra guards float error on exact values.)
-    const tenths = Math.floor(latestLog.peak_flow * 1000 / best + 1e-9);
-    out.percent_of_best = tenths / 10;
-    out.zone = tenths >= 800 ? "green" : tenths >= 500 ? "yellow" : "red";   // 80% and 50% belong to the better zone
-    out.advice = PEAK_ZONES[out.zone];
-  }
-  return out;
-}
-
-// GET /respiratory/summary — the last 30 days (`todayDate` and the 29 days before it). A section is null when the
-// user has no device of that kind. Devices set to inactive still count in the sections (their entries are real
-// history); only active devices' parts are listed in supplies_due, overdue first.
-async function summary(user, todayDate = today()) {
-  const devices = (await findAll("RespiratoryDevice", { user_id: user.user_id }, { ascending: "createdAt" })).map(deviceRow);
-  const allLogs = (await findAll("RespiratoryLog", { user_id: user.user_id }, { descending: "log_date" })).map(logRow);
-  const { from, to } = summaryWindow(todayDate);
-
-  const section = (types, build) => {
-    const mine = devices.filter((d) => types.includes(d.device_type));
-    if (!mine.length) return null;
-    const ids = new Set(mine.map((d) => d.device_id));
-    const logs = allLogs.filter((l) => ids.has(l.device_id));
-    return build(mine, logs.filter((l) => l.log_date >= from && l.log_date <= to), logs);
-  };
-
-  const supplies = await findAll("DeviceSupply", { user_id: user.user_id }, { ascending: "createdAt" });
-  const active = new Map(devices.filter((d) => d.is_active).map((d) => [d.device_id, d]));
-  const due = [];
-  for (const s of supplies) {
-    const row = supplyRow(s), device = active.get(row.device_id);
-    if (!device) continue;
-    const status = supplyStatus(row, todayDate);
-    if (status.due_status === "ok") continue;
-    due.push({ ...row, ...status, device_name: device.name, device_type: device.device_type });
-  }
-  due.sort((a, b) => a.days_left - b.days_left);
-
-  return {
-    pap: section(PAP_TYPES, (_d, logs) => papSummary(logs)),
-    oxygen: section(["oxygen_concentrator", "portable_oxygen"], (_d, logs) => oxygenSummary(logs)),
-    peak_flow: section(["peak_flow_meter"], (mine, logs, all) => peakFlowSummary(mine, logs, all)),
-    supplies_due: due,
-  };
+function logValues(body, original) {
+  const { values } = readLogFields(body, original ? logRow(original) : {});
+  return original ? values : { device_id: body.device_id, ...values };
 }
 
 module.exports = {
-  summary,
-  listDevices, createDevice, getDevice, updateDevice, removeDevice,
-  listSupplies, addSupply, updateSupply, removeSupply, markReplaced,
-  listLogs, createLog, updateLog, removeLog,
-  DEVICE_TYPES, MASK_TYPES, DEFAULT_SUPPLIES, LOG_RANGES, deviceRow, supplyRow, logRow, supplyStatus,
+  createDevice, createLog,
+  deviceProblem, deviceValues, afterDeviceSave, supplyProblem, supplyValues, logProblem, logValues,
+  DEVICE_TYPES, MASK_TYPES, DEFAULT_SUPPLIES, LOG_RANGES, SETTING_RANGES, DEVICE_FIELDS, SUPPLY_FIELDS, LOG_FIELDS,
+  deviceRow, supplyRow, logRow, supplyStatus,
 };

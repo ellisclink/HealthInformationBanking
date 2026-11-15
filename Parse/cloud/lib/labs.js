@@ -1,24 +1,24 @@
 // labs.js — Lab results (Tasks 5.1 / 5.2), on Parse.
-//   GET    /labs/catalog                 common tests with units, normal ranges, advice
-//   GET    /labs/summary                 latest value per test + what is out of range
-//   GET    /labs/results                 list (test, flag=abnormal|high|low|..., from, to, report_id)
-//   POST   /labs/results                 add one result, or {results:[...]} for a whole panel
-//   GET    /labs/results/:id, PUT /labs/results/:id (flag re-checked), DELETE /labs/results/:id
+// LabResult rows are read and written by the website with the Parse SDK (Vite/src/data/labs.ts: list, summary, add one
+// or a whole panel, edit, delete; the catalog is Vite/src/data/labCatalog.ts), guarded by RULES.LabResult in access.js
+// with the rules below (browserProblem / browserValues = buildResultRow): the server fills in the test name, panel, unit
+// and range from the catalog and decides the flag and range_source; report_id must be one of the caller's own LabReports.
+// The PDFs stay on the server (they are encrypted), as api routes:
 //   GET    /labs/reports                 uploaded PDFs (no file data)
 //   POST   /labs/reports                 upload a PDF: {file_base64, title?, report_date?, lab_name?, ordered_by?, notes?, file_name?}
 //   GET    /labs/reports/:id             one report + the results linked to it
 //   GET    /labs/reports/:id/file        the PDF, as {file_base64, file_name}
 //   PUT    /labs/reports/:id, DELETE /labs/reports/:id (its results stay, unlinked)
+// createResults() is still used by the PDF auto-fill (autofill.js) and the seed.
 // Classes: LabReport (the PDF is stored inside the object, encrypted with ENCRYPTION_KEY,
-// so it never gets a public file URL), LabResult. The test catalog is in reference.js.
+// so it never gets a public file URL), LabResult. The test catalog is in reference.js (a copy is in labCatalog.ts).
 
 const crypto = require("crypto");
-const { M, isId, isDate, toRow, findAll, findOne, getOwned, save, create, audit, param } = require("./db");
+const { M, isId, isDate, toRow, findAll, findOne, getOwned, save, create, audit } = require("./db");
 const sec = require("./security");
 const { LAB_TESTS } = require("./reference");
 
 const MAX_PDF_BYTES = 8 * 2 ** 20;   // 8 MB (the PDF is stored inside the database object)
-const FLAGS = ["normal", "low", "high", "critical_low", "critical_high", "abnormal"];
 const SOURCES = ["manual_entry", "document_upload", "provider_entered"];
 const MAX_PANEL = 50;
 const OUT_OF_RANGE = ["low", "high", "critical_low", "critical_high", "abnormal"];
@@ -29,8 +29,6 @@ const INSERT_FIELDS = RESULT_FIELDS.slice(1);
 const catalog = LAB_TESTS;
 const resultRow = (o) => toRow(o, "result_id", RESULT_FIELDS);
 const reportRow = (o) => toRow(o, "report_id", REPORT_FIELDS);
-const isHighFlag = (f) => f === "high" || f === "critical_high";
-const isLowFlag = (f) => f === "low" || f === "critical_low";
 
 function text(value, max) {
   if (value === null || value === undefined) return null;
@@ -110,13 +108,13 @@ function buildResultRow(body, catalog, base = null) {
     ref_low: base.ref_low, ref_high: base.ref_high, ref_text: base.ref_text, range_source: base.range_source,
     collected_date: base.collected_date, notes: base.notes, source: base.source, report_id: base.report_id,
     manual_flag: base.flag === "abnormal" || (base.value_numeric === null && base.flag === "normal") ? base.flag : null,
-  } : { source: "manual_entry", report_id: null, manual_flag: null };
+  } : { source: "manual_entry", report_id: null, manual_flag: null, ref_low: null, ref_high: null, ref_text: null };   // a range key not sent = none (never undefined)
 
   // which test
   if (has("test_code") || has("test_name") || !base) {
     const code = body.test_code == null || body.test_code === "" ? null : String(body.test_code);
     const test = findTest(catalog, code, body.test_name);
-    if (code && !test) return { error: `unknown test_code "${code}" — see GET /api/labs/catalog` };
+    if (code && !test) return { error: `unknown test_code "${code}"` };
     const name = text(body.test_name, 120);
     if (name === undefined) return { error: "test_name is too long (max 120)" };
     if (!test && !name) return { error: "test_name (or a test_code from the catalog) is required" };
@@ -221,91 +219,7 @@ async function reportBelongsToUser(reportId, userId) {
 }
 const resultValues = (row) => Object.fromEntries(INSERT_FIELDS.map((f) => [f, row[f] === undefined ? null : row[f]]));
 
-// GET /labs/catalog
-const getCatalog = () => ({ status: 200, tests: catalog.map(({ sort_order, ...t }) => t) });
-
-// GET /labs/summary
-async function summary(user) {
-  const rows = (await findAll("LabResult", { user_id: user.user_id })).map(resultRow)
-    .sort((a, b) => b.collected_date.localeCompare(a.collected_date) || b.created_at.localeCompare(a.created_at));
-  const groups = new Map();
-  for (const r of rows) {
-    const key = r.test_code || `name:${r.test_name.toLowerCase()}`;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(r);
-  }
-  const latest = [], needsAttention = [];
-  for (const [, results] of groups) {
-    const current = results[0];
-    const previous = results.slice(1).find((r) => r.value_numeric !== null && sameUnit(r.unit, current.unit)) || null;
-    const test = current.test_code ? catalog.find((c) => c.test_code === current.test_code) : null;
-    let change = null;
-    if (previous && current.value_numeric !== null) {
-      const delta = Number((current.value_numeric - previous.value_numeric).toFixed(4));
-      const direction = delta === 0 ? "same" : delta > 0 ? "up" : "down";
-      let trend = null;
-      if (isHighFlag(current.flag)) trend = delta < 0 ? "improving" : delta > 0 ? "worsening" : "no change";
-      else if (isLowFlag(current.flag)) trend = delta > 0 ? "improving" : delta < 0 ? "worsening" : "no change";
-      change = { previous_value: previous.value_numeric, previous_date: previous.collected_date, delta, direction, trend };
-    }
-    const item = { ...current, result_count: results.length, change, about: test ? test.about : null };
-    latest.push(item);
-    if (OUT_OF_RANGE.includes(current.flag)) {
-      let percent_outside = null;
-      if (current.value_numeric !== null) {
-        if (isHighFlag(current.flag) && current.ref_high) percent_outside = Math.round(((current.value_numeric - current.ref_high) / Math.abs(current.ref_high)) * 100);
-        else if (isLowFlag(current.flag) && current.ref_low) percent_outside = Math.round(((current.ref_low - current.value_numeric) / Math.abs(current.ref_low)) * 100);
-      }
-      const advice = test ? (isHighFlag(current.flag) ? test.advice_high : isLowFlag(current.flag) ? test.advice_low : null) : null;
-      needsAttention.push({ ...item, percent_outside, urgent: current.flag === "critical_low" || current.flag === "critical_high",
-        advice: advice || "This result is outside the normal range. Ask your doctor what it means for you." });
-    }
-  }
-  const rank = (f) => (f === "critical_high" || f === "critical_low" ? 0 : 1);
-  needsAttention.sort((a, b) => rank(a.flag) - rank(b.flag) || b.collected_date.localeCompare(a.collected_date) || (b.percent_outside ?? -1) - (a.percent_outside ?? -1));
-  latest.sort((a, b) => b.collected_date.localeCompare(a.collected_date) || a.test_name.localeCompare(b.test_name));
-  const reports = await findAll("LabReport", { user_id: user.user_id }, { select: ["title"] });
-  return {
-    status: 200, tests_tracked: latest.length, out_of_range_count: needsAttention.length,
-    urgent_count: needsAttention.filter((x) => x.urgent).length, in_range_count: latest.filter((x) => x.flag === "normal").length,
-    report_count: reports.length, needs_attention: needsAttention, latest,
-  };
-}
-
-// GET /labs/results?test=&flag=&from=&to=&report_id=
-async function listResults(query, user) {
-  let rows = (await findAll("LabResult", { user_id: user.user_id })).map(resultRow);
-  const test = param(query, "test");
-  if (test) rows = rows.filter((r) => r.test_code === test || r.test_name.toLowerCase() === String(test).trim().toLowerCase());
-  const flag = param(query, "flag");
-  if (flag) {
-    if (flag === "abnormal") rows = rows.filter((r) => OUT_OF_RANGE.includes(r.flag));
-    else if (FLAGS.includes(flag)) rows = rows.filter((r) => r.flag === flag);
-    else return { status: 400, error: `flag must be abnormal or one of: ${FLAGS.join(", ")}` };
-  }
-  for (const [k, cmp] of [["from", (a, b) => a >= b], ["to", (a, b) => a <= b]]) {
-    const v = param(query, k);
-    if (!v) continue;
-    if (!isDate(v)) return { status: 400, error: `${k} must be a date (YYYY-MM-DD)` };
-    rows = rows.filter((r) => cmp(r.collected_date, v));
-  }
-  const reportParam = param(query, "report_id");
-  if (reportParam) {
-    if (!isId(reportParam)) return { status: 400, error: "report_id must be a valid id" };
-    rows = rows.filter((r) => r.report_id === reportParam);
-  }
-  rows.sort((a, b) => b.collected_date.localeCompare(a.collected_date) || a.test_name.localeCompare(b.test_name) || b.created_at.localeCompare(a.created_at));
-  rows = rows.slice(0, 1000);
-  return { status: 200, results: rows, count: rows.length };
-}
-
-async function getResult(id, user) {
-  if (!isId(id)) return { status: 400, error: "Invalid result ID" };
-  const r = await getOwned("LabResult", id, user.user_id);
-  return r ? { status: 200, result: resultRow(r) } : { status: 404, error: "Lab result not found" };
-}
-
-// POST /labs/results — one result, or {results:[...]} (collected_date/report_id/source/panel at the top apply to all)
+// One result, or {results:[...]} (the PDF auto-fill; the page saves LabResult rows itself) (collected_date/report_id/source/panel at the top apply to all)
 async function createResults(body, user) {
   if (!body || typeof body !== "object") return { status: 400, error: "Request body required" };
   let items;
@@ -341,29 +255,21 @@ async function createResults(body, user) {
   };
 }
 
-async function updateResult(id, body, user) {
-  if (!isId(id)) return { status: 400, error: "Invalid result ID" };
-  if (!body || typeof body !== "object" || !Object.keys(body).length) return { status: 400, error: "Nothing to update" };
-  const r = await getOwned("LabResult", id, user.user_id);
-  if (!r) return { status: 404, error: "Lab result not found" };
-  const before = resultRow(r);
-  const { row, error } = buildResultRow(body, catalog, before);
-  if (error) return { status: 400, error };
-  if (!(await reportBelongsToUser(row.report_id, user.user_id))) return { status: 400, error: "report_id does not match one of your lab reports" };
-  await save(r, resultValues(row));
-  const after = resultRow(r);
-  await audit({ userId: user.user_id, event: "UPDATE", targetClass: "LabResult", targetId: r.id, oldData: before, newData: after });
-  return { status: 200, result: after };
+// ---------- browser saves (access.js RULES.LabResult) ----------
+// What the browser may send. range_source is never sent (the server decides it); flag may be sent only as the manual
+// flag of a text result (normal / abnormal), the stored flag is always the one computeFlag decides. The page's "value"
+// shortcut is split into value_numeric / value_text in labs.ts before the save.
+const BROWSER_FIELDS = ["report_id", "test_code", "test_name", "panel", "value_numeric", "value_text", "unit", "ref_low", "ref_high", "ref_text",
+  "flag", "collected_date", "notes", "source"];
+// body = the fields sent (a cleared field is null), as the old POST (original = null) and PUT bodies
+const buildFor = (body, original) => buildResultRow(body, catalog, original ? resultRow(original) : null);
+function browserProblem(body, { original }) {
+  return buildFor(body, original).error || null;
 }
-
-async function deleteResult(id, user) {
-  if (!isId(id)) return { status: 400, error: "Invalid result ID" };
-  const r = await getOwned("LabResult", id, user.user_id);
-  if (!r) return { status: 404, error: "Lab result not found" };
-  const old = resultRow(r);
-  await r.destroy(M);
-  await audit({ userId: user.user_id, event: "DELETE", targetClass: "LabResult", targetId: id, oldData: old });
-  return { status: 200, message: "Lab result deleted", result_id: id };
+function browserValues(body, { original }) {
+  const { row, error } = buildFor(body, original);
+  if (error) throw new Parse.Error(Parse.Error.VALIDATION_ERROR, error);   // browserProblem ran the same checks
+  return resultValues(row);
 }
 
 // ---------- reports (PDF files) ----------
@@ -488,6 +394,6 @@ async function deleteReport(id, user) {
 }
 
 module.exports = {
-  MAX_PDF_BYTES, computeFlag, getCatalog, summary, listResults, getResult, createResults, updateResult, deleteResult,
-  uploadReport, listReports, getReport, getReportFile, updateReport, deleteReport,
+  MAX_PDF_BYTES, computeFlag, createResults, uploadReport, listReports, getReport, getReportFile, updateReport, deleteReport,
+  BROWSER_FIELDS, browserProblem, browserValues, resultRow,
 };

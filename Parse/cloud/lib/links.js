@@ -1,16 +1,16 @@
 // links.js — Personal Link Repository (Task 5.4), on Parse. Class: PersonalLink
-//   GET/POST /links, GET/PUT/DELETE /links/:id, POST /links/:id/opened
+//   The My Links page reads and saves with the Parse SDK (Vite/src/data/links.ts); the owner-only rules in access.js
+//   (RULES.PersonalLink) use fields/row from here. There are no /links routes any more. create() is used by seed.
 // Links and phone numbers only. URLs with a username/password are refused, and only
 // http/https links are allowed (a "javascript:" link would run code when clicked).
 
-const { M, isId, toRow, findAll, findOne, getOwned, save, create, audit, param } = require("./db");
+const { toRow, findAll, create, audit } = require("./db");
 
 const CATEGORIES = ["insurance", "pharmacy", "patient_portal", "lab_results", "device_app", "telehealth", "provider", "other"];
 const FIELDS = ["user_id", "title", "url", "category", "organization", "phone", "member_id_hint", "notes", "is_favorite", "open_count", "last_opened_at"];
 const MAX_LINKS = 200;
 const PHONE = /^[0-9+().\-\s]{7,30}(\s*(x|ext\.?)\s*\d{1,6})?$/i;
 const row = (o) => toRow(o, "link_id", FIELDS);
-const notFound = (id) => ({ status: isId(id) ? 404 : 400, error: isId(id) ? "Link not found" : "Invalid link ID" });
 
 function cleanUrl(raw) {
   let s = String(raw == null ? "" : raw).trim();
@@ -25,6 +25,7 @@ function cleanUrl(raw) {
   return { url: u.toString() };
 }
 
+// Field rules for create (title and url required) and update (partial: only what was sent). Returns { values } or { error }.
 function fields(body, partial) {
   const out = {};
   const has = (k) => Object.prototype.hasOwnProperty.call(body, k);
@@ -66,19 +67,7 @@ function fields(body, partial) {
   return { values: out };
 }
 
-async function list(query, user) {
-  const category = param(query, "category");
-  if (category && !CATEGORIES.includes(category)) return { status: 400, error: `category must be one of: ${CATEGORIES.join(", ")}` };
-  let rows = (await findAll("PersonalLink", { user_id: user.user_id })).map(row);
-  if (category) rows = rows.filter((l) => l.category === category);
-  rows.sort((a, b) => (b.is_favorite ? 1 : 0) - (a.is_favorite ? 1 : 0) || a.category.localeCompare(b.category) || a.title.toLowerCase().localeCompare(b.title.toLowerCase()));
-  return { status: 200, links: rows, count: rows.length, categories: CATEGORIES };
-}
-
-async function getById(id, user) {
-  const l = await getOwned("PersonalLink", id, user.user_id);
-  return l ? { status: 200, link: row(l) } : notFound(id);
-}
+const duplicateMessage = (title) => `You already saved this link as "${title}"`;
 
 async function createLink(body, user) {
   if (!body || typeof body !== "object") return { status: 400, error: "Request body required" };
@@ -87,47 +76,13 @@ async function createLink(body, user) {
   const existing = await findAll("PersonalLink", { user_id: user.user_id }, { select: ["url", "title"] });
   if (existing.length >= MAX_LINKS) return { status: 400, error: `You can save up to ${MAX_LINKS} links` };
   const dup = existing.find((l) => l.get("url") === values.url);
-  if (dup) return { status: 409, error: `You already saved this link as "${dup.get("title")}"`, link_id: dup.id };
+  if (dup) return { status: 409, error: duplicateMessage(dup.get("title")), link_id: dup.id };
   const l = await create("PersonalLink", { category: "other", is_favorite: false, open_count: 0, ...values, user_id: user.user_id });
   const data = row(l);
   await audit({ userId: user.user_id, event: "INSERT", targetClass: "PersonalLink", targetId: l.id, newData: data });
   return { status: 201, link: data };
 }
 
-async function update(id, body, user) {
-  if (!body || typeof body !== "object") return { status: 400, error: "Request body required" };
-  const { values, error } = fields(body, true);
-  if (error) return { status: 400, error };
-  if (!Object.keys(values).length) return { status: 400, error: "Nothing to update" };
-  const l = await getOwned("PersonalLink", id, user.user_id);
-  if (!l) return notFound(id);
-  if (values.url && values.url !== l.get("url")) {
-    const dup = await findOne("PersonalLink", { user_id: user.user_id, url: values.url });
-    if (dup && dup.id !== l.id) return { status: 409, error: `You already saved this link as "${dup.get("title")}"` };
-  }
-  const old = row(l);
-  await save(l, values);
-  const data = row(l);
-  await audit({ userId: user.user_id, event: "UPDATE", targetClass: "PersonalLink", targetId: l.id, oldData: old, newData: data });
-  return { status: 200, link: data };
-}
-
-async function remove(id, user) {
-  const l = await getOwned("PersonalLink", id, user.user_id);
-  if (!l) return notFound(id);
-  const old = row(l);
-  await l.destroy(M);
-  await audit({ userId: user.user_id, event: "DELETE", targetClass: "PersonalLink", targetId: id, oldData: old });
-  return { status: 200, message: "Link deleted", link_id: id };
-}
-
-async function opened(id, user) {
-  const l = await getOwned("PersonalLink", id, user.user_id);
-  if (!l) return notFound(id);
-  l.increment("open_count");
-  l.set("last_opened_at", new Date());
-  await l.save(null, M);
-  return { status: 200, link_id: l.id, open_count: l.get("open_count"), last_opened_at: l.get("last_opened_at").toISOString() };
-}
-
-module.exports = { list, getById, create: createLink, update, remove, opened, cleanUrl, CATEGORIES };
+// fields, row, FIELDS, CATEGORIES, MAX_LINKS and duplicateMessage are also used by access.js (RULES.PersonalLink: the
+// browser saves PersonalLink directly with the same rules); create is used by seed and the tests.
+module.exports = { create: createLink, fields, cleanUrl, duplicateMessage, row, FIELDS, CATEGORIES, MAX_LINKS };

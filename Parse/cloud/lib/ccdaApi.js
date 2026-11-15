@@ -215,7 +215,6 @@ async function importSelected(body, user, ctx) {
       have.add(norm(name)); added++;
     }
     if (added) {
-      // note: a patient edit clears a physician's "verified" stamp (records.putRecord does that)
       const saved = await records.putRecord({ data: { ...data, allergies: list, no_known_allergies: false } }, user, ctx,
         { afterRecordSaved: (uid, d) => safety.syncAllergiesFromRecord(uid, d) });
       if (saved.status >= 400) { result.allergies.failed += added; note("allergies", `${added} allergies`, saved.error || "Not saved"); }

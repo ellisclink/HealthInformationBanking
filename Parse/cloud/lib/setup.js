@@ -4,17 +4,19 @@
 // adds what's missing). It can also be run by hand from the Back4app dashboard:
 // API Console > Cloud Code > run "setup" with the Master Key.
 //
-// Every class is locked to the master key: browsers never read or write these classes
-// directly. All requests go through the `api` Cloud Function, which checks the session and
-// only touches that user's data. (This replaces the old SQL schema files.)
+// Every class except the OWNER_CLASSES (Medication, DoseLog, Refill, DiaryEntry, Condition, ConditionNote, ConditionTarget, ccda_object, PersonalLink, NutritionLog, VitalReading, RespiratoryDevice, DeviceSupply, RespiratoryLog, Reminder, Notification, NotificationPrefs, CalendarEvent, LabResult, Allergy, SafetyAlert, DisposalLog, MedicalRecord, EmergencyProfile)
+// is locked to the master key: browsers never read or write the locked classes directly. All requests for them go through
+// the `api` Cloud Function, which checks the session and only touches that user's data. The OWNER_CLASSES (OWNER_CLP:
+// logged-in users only) are the exception: the browser uses them directly and the triggers in access.js guard them. (This replaces the old SQL schema files.)
 
 const S = "String", N = "Number", B = "Boolean", D = "Date", A = "Array", O = "Object";
 const str = (...names) => Object.fromEntries(names.map((n) => [n, S]));
 
 const SCHEMA = {
-  // the Health History form (one per patient); the verified_* fields are legacy (D-015) — kept so old data stays readable, never written
+  // the Health History form (one per patient; an owner class, access.js RULES.MedicalRecord: the browser may only send data);
+  // the verified_* fields are legacy (D-015) — kept so old data stays readable, never written (the browser is refused them)
   MedicalRecord: { user_id: S, data: O, verified_by_physician: B, verified_by: S, verified_npi: S, verified_at: D },
-  // sharing
+  // sharing; audience is "family" for every new code ("provider" on old rows, which are refused now)
   ShareCode: { share_code: S, user_id: S, expires_at: D, revoked: B, audience: S, sections: A, label: S },
   // emergency opens (audience "emergency") also use viewer_agency and reason; viewer_npi then holds the responder's badge/license number
   AccessLog: { ...str("patient_user_id", "share_code", "audience", "action", "viewer_user_id", "viewer_name", "viewer_npi", "viewer_agency", "reason", "ip_address", "user_agent"),
@@ -85,8 +87,12 @@ const SCHEMA = {
     times: A, days_of_week: A, remind_at: D, next_due_at: D, last_fired_at: D, snoozed_until: D, email_me: B, active: B },
   Notification: { ...str("user_id", "kind", "title", "message", "link", "action", "dedupe_key", "reminder_id"), dismissed_at: D, read_at: D },
   NotificationPrefs: { user_id: S, low_stock: B, appointments: B, supplies: B, disposal: B, email: B },
+  // the CCDA page (Vite/src/pages/CCDA.tsx) saves parsed C-CDA files here with the Parse SDK (camelCase names are the page's);
+  // parseApiObject is the whole parsed record. An owner class: access.js RULES.ccda_object guards it.
+  ccda_object: { ...str("user_id", "fileName", "patientName", "patientDob"), parseApiObject: O },
 };
-// emergency responder access (7-1): what a responder may see, the DNR / declined-measures wishes, and the code
+// emergency responder access (7-1): what a responder may see, the DNR / declined-measures wishes (EmergencyProfile, one per
+// patient: an owner class, access.js RULES.EmergencyProfile), and the code (EmergencyAccess: locked, server only)
 const EXTRA = {
   EmergencyProfile: { ...str("user_id", "blood_type", "medical_notes", "code_status", "directive_notes", "directive_document_id"),
     enabled: B, sections: A, contacts: A, declined_measures: A, polst_on_file: B, share_directive_document: B, directive_updated_at: D },
@@ -97,6 +103,7 @@ const EXTRA = {
   DeletionRequest: { ...str("user_id", "status"), immediate: B, requested_at: D, scheduled_for: D, completed_at: D, cancelled_at: D },
 };
 Object.assign(SCHEMA, EXTRA);
+// npi: legacy (physician accounts were removed; convertPhysicians clears it), kept so old rows still load
 // terms_version / terms_accepted_at: which Terms of Service and Privacy Policy the account agreed to, and when (see legal.js)
 const USER_FIELDS = { name: S, role: S, npi: S, terms_version: S, terms_accepted_at: D };
 
@@ -109,6 +116,16 @@ const INDEXES = {
 };
 
 const LOCKED = { find: {}, count: {}, get: {}, create: {}, update: {}, delete: {}, addField: {}, protectedFields: {} };
+// The owner classes are opened to logged-in users (guarded by the triggers in access.js: owner filter, ACL, role = patient).
+// Anonymous requests are still refused; every other class stays LOCKED. failclosed.js keeps its own copy of this list
+// (it must load with no dependencies); a test checks the two match.
+const OWNER_CLASSES = ["Medication", "DoseLog", "Refill", "DiaryEntry", "Condition", "ConditionNote", "ConditionTarget", "ccda_object", "PersonalLink", "NutritionLog", "VitalReading", "RespiratoryDevice", "DeviceSupply", "RespiratoryLog", "Reminder", "Notification", "NotificationPrefs", "CalendarEvent", "LabResult", "Allergy", "SafetyAlert", "DisposalLog", "MedicalRecord", "EmergencyProfile"];
+const AUTH = { requiresAuthentication: true };
+const OWNER_CLP = { find: { ...AUTH }, count: { ...AUTH }, get: { ...AUTH }, create: { ...AUTH }, update: { ...AUTH }, delete: { ...AUTH }, addField: {}, protectedFields: {} };
+// _User: locked like the others EXCEPT create, which is public so the Register page can call Parse's signUp. What a
+// sign-up may contain (patient only, terms, password rules, 10 an hour) is checked by auth.beforeSaveUser; afterSaveUser
+// revokes the session it returns. Nothing else is opened: no find/get/count/update/delete/addField for anyone.
+const USER_CLP = { ...LOCKED, create: { "*": true } };
 const CLASSES = Object.keys(SCHEMA);
 const ADD = { String: "addString", Number: "addNumber", Boolean: "addBoolean", Date: "addDate", Array: "addArray", Object: "addObject" };
 
@@ -157,8 +174,11 @@ function startBackfill() {
 // Parse's built-in classes that nothing here uses but that are readable by default: locked too, so nothing is left open.
 const ALSO_LOCK = ["_Role", "_Installation"];
 
-// Pure check (tested): given the schemas Parse reports, which classes are NOT locked to the master key?
-//   a class counts as locked when every action in LOCKED is an empty rule ({}), i.e. nobody but the master key may do it
+const sameRule = (a, b) => !!a && JSON.stringify(Object.entries(a).sort()) === JSON.stringify(Object.entries(b).sort());
+
+// Pure check (tested): given the schemas Parse reports, which classes lack their expected permissions?
+//   an OWNER class (OWNER_CLASSES) must match OWNER_CLP exactly, _User must match USER_CLP exactly; every other class must be locked:
+//   it counts as locked when every action in LOCKED is an empty rule ({}), i.e. nobody but the master key may do it
 function lockProblems(schemas, expected = [...Object.keys(SCHEMA), "_User", ...ALSO_LOCK]) {
   const byName = new Map((schemas || []).map((s) => [s.className, s]));
   const problems = [];
@@ -166,6 +186,18 @@ function lockProblems(schemas, expected = [...Object.keys(SCHEMA), "_User", ...A
     const s = byName.get(name);
     if (!s) { problems.push({ class: name, problem: "does not exist yet (run setup)" }); continue; }
     const clp = s.classLevelPermissions || {};
+    if (OWNER_CLASSES.includes(name)) {
+      // owner classes must match OWNER_CLP exactly (logged-in only; no public entry, nothing missing)
+      const wrong = Object.keys(OWNER_CLP).filter((action) => !sameRule(clp[action], OWNER_CLP[action]));
+      if (wrong.length) problems.push({ class: name, problem: "does not match the owner profile for: " + wrong.join(", ") });
+      continue;
+    }
+    if (name === "_User") {
+      // _User must match USER_CLP exactly: public create (sign-up) and nothing else
+      const wrong = Object.keys(USER_CLP).filter((action) => !sameRule(clp[action], USER_CLP[action]));
+      if (wrong.length) problems.push({ class: name, problem: "does not match the user profile (locked, public sign-up only) for: " + wrong.join(", ") });
+      continue;
+    }
     const open = Object.keys(LOCKED).filter((action) => {
       const rule = clp[action];
       return !rule || Object.keys(rule).length > 0;     // missing rule = Parse's default (open); any entry = someone is allowed
@@ -185,8 +217,8 @@ async function auditLocks() {
 async function ensureSetup(force = false) {
   if (done && !force) { startBackfill(); return { ok: true, cached: true }; }
   const result = {};
-  for (const [c, fields] of Object.entries(SCHEMA)) result[c] = await ensureClass(c, fields, LOCKED, INDEXES[c]);
-  result._User = await ensureClass("_User", USER_FIELDS, LOCKED);
+  for (const [c, fields] of Object.entries(SCHEMA)) result[c] = await ensureClass(c, fields, OWNER_CLASSES.includes(c) ? OWNER_CLP : LOCKED, INDEXES[c]);
+  result._User = await ensureClass("_User", USER_FIELDS, USER_CLP);
   for (const c of ALSO_LOCK) result[c] = await ensureClass(c, {}, LOCKED);
   done = true;
   startBackfill();
@@ -194,7 +226,7 @@ async function ensureSetup(force = false) {
 }
 
 module.exports = {
-  ensureSetup, ensureClass, auditLocks, lockProblems, LOCKED, CLASSES, SCHEMA, INDEXES,
+  ensureSetup, ensureClass, auditLocks, lockProblems, LOCKED, OWNER_CLP, USER_CLP, OWNER_CLASSES, CLASSES, SCHEMA, INDEXES,
   // for tests
   _backfillInFlight: () => backfillRun,
   _resetBackfill: () => { backfilled = false; backfillRun = null; backfillFailedAt = null; },
