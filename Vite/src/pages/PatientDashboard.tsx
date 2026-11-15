@@ -91,24 +91,7 @@ function PatientDashboard() {
           
           <MedicalRecordCard
             title="Medical Records"
-            description="Click to view your medical history."
-          />
-          <MedicalRecordCard
-            title="Allergies"
-            count={counts?.allergies ?? null}
-            description="Review documented allergies and reactions."
-          />
-
-          <MedicalRecordCard
-            title="Immunizations"
-            count={counts?.immunizations ?? null}
-            description="View vaccination history and dates."
-          />
-
-          <MedicalRecordCard
-            title="Procedures"
-            count={counts?.procedures ?? null}
-            description="Review previous medical procedures."
+            description="Your health history, medications, allergies, immunizations and procedures."
           />
         </section>
       </main>
