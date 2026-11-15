@@ -89,9 +89,8 @@ function PatientDashboard() {
           <Link className="feature-card dashboard-link" to="/respiratory"><h3>Breathing Devices</h3><p>Track your breathing devices and how you use them.</p></Link>
           <Link className="feature-card dashboard-link" to="/disposal"><h3>Safe Disposal</h3><p>Learn how to safely get rid of leftover medicine.</p></Link>
           <MedicalRecordCard
-            title="Health Record"
-            count={counts?.medications ?? null}
-            description="View your personal health record."
+            title="Medical Record"
+            description="View your personal medical record."
           />
 
           <MedicalRecordCard
