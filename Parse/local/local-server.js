@@ -20,6 +20,11 @@ const fs = require("fs");
 const express = require("express");
 const { ParseServer } = require("parse-server");
 
+// Your own computer has no mail server, so let login codes print in this window (see Parse/cloud/lib/security.js: without
+// this, sending a code fails instead of writing it to the log). It must be set before the Cloud Code loads.
+// Do not set MIB_DEV_MODE on a site with real users.
+if (process.env.MIB_DEV_MODE === undefined) process.env.MIB_DEV_MODE = "true";
+
 const PORT = Number(process.env.PORT) || 1337;
 const SERVER_URL = `http://127.0.0.1:${PORT}/parse`;
 const DATABASE_URI = process.env.PARSE_DATABASE_URI || "postgres://postgres:1234@localhost:5432/mib_parse";
@@ -65,6 +70,9 @@ async function main() {
     logLevels: { cloudFunctionSuccess: "silent" },
     encodeParseObjectInCloudFunction: true,
     enableInsecureAuthAdapters: false,
+    // Locks an account for 15 minutes after 5 wrong passwords. This also covers calls made straight to Parse's /login,
+    // which the app's own rate limits (cloud/lib/security.js) never see. On Back4app turn on the same setting (README).
+    accountLockout: { duration: 15, threshold: 5, unlockOnPasswordReset: true },
   });
   await server.start();
 
