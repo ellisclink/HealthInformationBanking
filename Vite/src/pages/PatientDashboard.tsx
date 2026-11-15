@@ -90,9 +90,8 @@ function PatientDashboard() {
           <Link className="feature-card dashboard-link" to="/disposal"><h3>Safe Disposal</h3><p>Learn how to safely get rid of leftover medicine.</p></Link>
           
           <MedicalRecordCard
-            title="Medication History"
-            count={counts?.medications ?? null}
-            description="Current and past medications on your health record."
+            title="Medical Records"
+            description="Click to view your medical history."
           />
           <MedicalRecordCard
             title="Allergies"
