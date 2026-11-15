@@ -7,16 +7,12 @@ import {
   type Allergy, type HealthHistory, type Immunization, type Medication, type Surgery,
 } from "../healthHistory";
 import { addMedication as saveMedication, listMedications, type Med } from "../data/medications";
+import { getRecord, putRecord } from "../data/records";
 
 type MedKind = "prescription" | "non_prescription";
 
-type RecordResponse = {
-  data: unknown;
-  updated_at: string | null;
-};
-
 // The patient's health history, laid out like the paper intake form a doctor's
-// office hands you. Saved as the patient's record (PUT /api/records), which is what
+// office hands you. Saved as the patient's record (MedicalRecord, data/records.ts), which is what
 // share codes show under "Medical record".
 // Medications are listed from the Medications tracker; "+ Add" goes to that page and
 // comes back here when the medication is saved.
@@ -35,7 +31,7 @@ function HealthHistoryForm() {
 
   useEffect(() => {
     Promise.all([
-      api<RecordResponse>("/records"),
+      getRecord(),
       listMedications(),
       api<Me>("/me").catch(() => null),
     ])
@@ -112,8 +108,8 @@ function HealthHistoryForm() {
     if (!form.patient.name.trim()) { setError("Please enter your name."); return; }
     setBusy(true); setError(""); setMessage("");
     try {
-      await api("/records", { method: "PUT", body: JSON.stringify({ data: compactHealthHistory(form) }) });
-      setMeta({ updated_at: new Date().toISOString() });
+      const saved = await putRecord(compactHealthHistory(form));
+      setMeta({ updated_at: saved.updated_at ?? new Date().toISOString() });
       setDirty(false);
       setMessage("Saved.");
     } catch (e) { setError((e as Error).message); }

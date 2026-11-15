@@ -2,17 +2,20 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import AlertBanner from "../components/AlertBanner";
 import NavigationBar from "../components/NavigationBar";
-import { api, localDate } from "../api";
+import { localDate } from "../api";
 import { listMedications } from "../data/medications";
+import { disposalDue, disposalGuidance, disposalMethods, listDisposals, recordDisposal, removeDisposal, type DisposalInput } from "../data/disposal";
 
 // Safe disposal: leftover medicines with step-by-step guidance, a log of what the
 // patient has already gotten rid of, and a look-up for any other medicine.
-//   GET  /disposal/due       -> leftover medicines (stopped, completed or past their end date) + guidance
-//   GET  /disposal/guidance  -> guidance for any medicine name
-//   GET  /disposal/methods   -> the eight disposal methods
-//   GET/POST /disposal/logs, DELETE /disposal/logs/:id -> the disposal history
+//   disposalDue()        -> leftover medicines (stopped, completed or past their end date) + guidance
+//   disposalGuidance()   -> guidance for any medicine name
+//   disposalMethods()    -> the eight disposal methods
+//   listDisposals / recordDisposal / removeDisposal -> the disposal history (DisposalLog; the server takes the
+//                           quantity off the medicine's count after a disposal)
+// All of it is in data/disposal.ts and data/disposalGuide.ts (Parse SDK; the guidance lists are a copy of the server's).
 // The medicine pick-list comes from listMedications() (data/medications.ts, Parse SDK).
-// All guidance is plain text from the server and is shown as text only.
+// All guidance is plain text and is shown as text only.
 
 type Link = { key: string; label: string; url: string };
 type Guidance = { method: string; title: string; summary: string; steps: string[]; links: Link[]; on_flush_list: boolean };
@@ -31,7 +34,7 @@ type DisposalLog = {
 const TOLERANCE = 0.000001;   // same as the server, for comparing with the count on hand
 const QUANTITY_ERROR = "Quantity must be a number above 0 and up to 100,000, with at most 2 decimal places";
 const FORMS = ["tablet", "capsule", "liquid", "injection", "inhaler", "patch", "cream", "drops", "spray", "powder", "other"];
-// used until /disposal/methods answers (titles come from the server)
+// used until the method titles are loaded (they come from disposalGuide.ts)
 const FALLBACK_METHODS: Method[] = [
   { key: "take_back", title: "Drug take-back" }, { key: "flush", title: "Flush (FDA flush list)" },
   { key: "flush_patch", title: "Flush the patch (FDA flush list)" }, { key: "trash", title: "Household trash" },
@@ -84,20 +87,17 @@ function Disposal() {
   const [lookupError, setLookupError] = useState("");
 
   async function loadLists() {
-    const [d, l] = await Promise.all([
-      api<{ medications: Due[]; note: string }>("/disposal/due"),
-      api<{ logs: DisposalLog[] }>("/disposal/logs"),
-    ]);
+    const [d, l] = await Promise.all([disposalDue(), listDisposals()]);
     setDue(d.medications); setNote(d.note); setLogs(l.logs);
   }
 
   useEffect(() => {
     // the medicine pick-list and the method titles are extras: the page still works without them
     Promise.all([
-      api<{ medications: Due[]; note: string }>("/disposal/due"),
-      api<{ logs: DisposalLog[] }>("/disposal/logs"),
+      disposalDue(),
+      listDisposals(),
       listMedications().catch(() => [] as MedOption[]),
-      api<{ methods: Method[] }>("/disposal/methods").catch(() => ({ methods: [] as Method[] })),
+      Promise.resolve(disposalMethods()),
     ])
       .then(([d, l, m, t]) => {
         setDue(d.medications); setNote(d.note); setLogs(l.logs); setMeds(m);
@@ -134,14 +134,14 @@ function Disposal() {
     if (selected && qty > Number(selected.quantity_on_hand) + TOLERANCE) { setError(`Only ${Number(selected.quantity_on_hand)} left on hand`); return; }
     if (!medId && !form.medication_name.trim()) { setError("Choose the medicine, or type its name."); return; }
     if (form.disposed_date && form.disposed_date > localDate()) { setError("The date can't be in the future."); return; }
-    const body: Record<string, unknown> = { quantity: qty, method: form.method };
+    const body: DisposalInput = { quantity: qty, method: form.method };
     if (medId) body.medication_id = medId; else body.medication_name = form.medication_name.trim();
     if (form.location.trim()) body.location = form.location.trim();
     if (form.disposed_date) body.disposed_date = form.disposed_date;
     if (form.notes.trim()) body.notes = form.notes.trim();
     setBusy(true);
     try {
-      const r = await api<{ message?: string }>("/disposal/logs", { method: "POST", body: JSON.stringify(body) });
+      const r = await recordDisposal(body);
       setForm(emptyForm()); setFormOpen(false);
       setMessage(r.message || "Disposal recorded");
     } catch (e) { setError((e as Error).message); setBusy(false); return; }
@@ -159,7 +159,7 @@ function Disposal() {
     if (!window.confirm("Remove this entry from your disposal history? Your pill count will not change.")) return;
     setBusy(true); setError(""); setMessage(""); setRefreshError("");
     try {
-      const r = await api<{ message?: string }>(`/disposal/logs/${encodeURIComponent(String(l.disposal_id))}`, { method: "DELETE" });
+      const r = await removeDisposal(String(l.disposal_id));
       setMessage(r.message || "Disposal record removed");
     } catch (e) { setError((e as Error).message); setBusy(false); return; }
     try { await loadLists(); }
@@ -172,11 +172,9 @@ function Disposal() {
     setLookupError(""); setLookupResult(null);
     const name = lookup.name.trim();
     if (!name) { setLookupError("Type the medicine's name."); return; }
-    const qs = new URLSearchParams({ name });
-    if (lookup.form) qs.set("form", lookup.form);
     setBusy(true);
     try {
-      const r = await api<{ guidance: Guidance; note: string }>(`/disposal/guidance?${qs.toString()}`);
+      const r = disposalGuidance({ name, form: lookup.form || null });
       setLookupResult({ guidance: r.guidance, note: r.note, name });
     } catch (e) { setLookupError((e as Error).message); }
     finally { setBusy(false); }

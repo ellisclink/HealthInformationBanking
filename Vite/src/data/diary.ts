@@ -7,6 +7,7 @@
 import Parse from "../parse";
 import { run } from "./parseCall";
 import type { DiaryInput } from "../api";
+import { MAX_ROWS, ownerAcl } from "./common";
 
 export type { DiaryInput };
 
@@ -26,7 +27,6 @@ const labels: Record<string, string> = Object.fromEntries(
   Object.entries(categories).map(([label, value]) => [value, label])
 );
 
-const MAX_ROWS = 10000;   // same cap as findAll() on the server
 
 const dateText = (v: unknown): string => (v instanceof Date ? v.toISOString() : typeof v === "string" ? v : "").slice(0, 10);
 
@@ -42,16 +42,6 @@ function toDisplay(result: Parse.Object): DisplayEntry {
     mood: result.get("mood") || "",
     followUpNeeded: result.get("follow_up_needed") === true,
   };
-}
-
-// owner read + write, nothing public (the server sets the same ACL anyway)
-function ownerAcl(): Parse.ACL {
-  const acl = new Parse.ACL();
-  acl.setPublicReadAccess(false);
-  acl.setPublicWriteAccess(false);
-  const user = Parse.User.current();
-  if (user) { acl.setReadAccess(user, true); acl.setWriteAccess(user, true); }
-  return acl;
 }
 
 // list(): newest entry_date first, then newest created first (as diary.list did)

@@ -1,20 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api } from "../api";
 import { getMedicationById, logDose } from "../data/medications";
-
-type Notice = {
-  notification_id: string;
-  kind: string;
-  title: string;
-  message: string | null;
-  link: string | null;
-  action: string | null;
-  read_at: string | null;
-  dismissed_at: string | null;
-  created_at: string;
-  reminder_id: string | null;
-};
+import * as inbox from "../data/notifications";
+import type { Notice } from "../data/notifications";
+import { snoozeReminder } from "../data/reminders";
 
 const POLL_MS = 60_000;
 
@@ -45,7 +34,7 @@ function NotificationBell() {
 
   const refreshCount = useCallback(async () => {
     try {
-      const r = await api<{ count: number }>("/notifications/count");
+      const r = await inbox.countUnread();
       setUnread(r.count || 0);
     } catch {
       // a failed background poll is not worth interrupting the page for
@@ -55,7 +44,7 @@ function NotificationBell() {
   const loadList = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await api<{ notifications: Notice[]; unread: number }>("/notifications");
+      const r = await inbox.listNotifications();
       setItems(r.notifications || []);
       setUnread(r.unread || 0);
     } catch (err) {
@@ -115,18 +104,13 @@ function NotificationBell() {
   }
 
   const markRead = (id: string) =>
-    run(() => api(`/notifications/${encodeURIComponent(id)}/read`, { method: "POST" }));
+    run(() => inbox.markRead(id));
 
   const dismiss = (id: string) =>
-    run(() => api(`/notifications/${encodeURIComponent(id)}`, { method: "DELETE" }));
+    run(() => inbox.dismiss(id));
 
   const snooze = (n: Notice) =>
-    run(() =>
-      api(`/reminders/${encodeURIComponent(String(n.reminder_id))}/snooze`, {
-        method: "POST",
-        body: JSON.stringify({ minutes: 15 }),
-      }),
-    );
+    run(() => snoozeReminder(String(n.reminder_id), 15));
 
   // Logging a dose is never retried automatically: the button is disabled while the request is
   // in flight, and once the dose is saved it stays hidden even if marking the item read fails.
@@ -146,7 +130,7 @@ function NotificationBell() {
       saved = true;
       setDoseLogged((s) => new Set(s).add(id));
       setError("");
-      await api(`/notifications/${encodeURIComponent(id)}/read`, { method: "POST" });
+      await inbox.markRead(id);
     } catch (err) {
       setError(
         saved
@@ -165,13 +149,13 @@ function NotificationBell() {
     await loadList();
   }
 
-  const readAll = () => run(() => api("/notifications/read-all", { method: "POST" }));
-  const clearRead = () => run(() => api("/notifications?read=true", { method: "DELETE" }));
+  const readAll = () => run(() => inbox.readAll());
+  const clearRead = () => run(() => inbox.clearRead());
 
   async function openItem(n: Notice) {
     if (!n.read_at) {
       try {
-        await api(`/notifications/${encodeURIComponent(n.notification_id)}/read`, { method: "POST" });
+        await inbox.markRead(n.notification_id);
       } catch (err) {
         setError(errorText(err));
         return;

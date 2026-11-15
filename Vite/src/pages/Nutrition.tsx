@@ -1,29 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import NavigationBar from "../components/NavigationBar";
 import { api, localDate } from "../api";
+import { listLogs, daySummary, addLog, updateLog, deleteLog } from "../data/nutrition";
+import type { LogRow, Summary, NutritionInput } from "../data/nutrition";
 
 // Nutrition: search USDA foods, log what you ate, see a day's totals and the last 30 days.
-//   POST   /nutrition/search {query}              -> { foods } (502 + message when USDA is unavailable)
-//   POST   /nutrition/log                         -> add an entry
-//   GET    /nutrition/summary?date=&tz=           -> totals for one day
-//   GET    /nutrition/logs?startDate=&endDate=&tz= -> history
-//   PUT/DELETE /nutrition/log/:id
+//   POST   /nutrition/search {query}   -> { foods } (502 + message when USDA is unavailable); the only api call here
+//   the food log (add, edit, delete, history, a day's totals) is read and saved with the Parse SDK (data/nutrition.ts)
 // Everything from USDA is shown as plain text.
 
 type Food = {
   fdcId: string; description: string; brandOwner: string | null;
   servingSize: number; servingUnit: string;
   calories?: number; proteinG?: number; carbsG?: number; fatG?: number; fiberG?: number; sugarG?: number; sodiumMg?: number;
-};
-type LogRow = {
-  log_id: string | number; food_name: string; usda_fdc_id: string | null;
-  serving_size: number | string | null; serving_unit: string | null; logged_at: string;
-  calories: number | string | null; protein_g: number | string | null; carbs_g: number | string | null; fat_g: number | string | null;
-  fiber_g: number | string | null; sugar_g: number | string | null; sodium_mg: number | string | null;
-};
-type Summary = {
-  date: string; meal_count: number; total_calories: number; total_protein: number; total_carbs: number;
-  total_fat: number; total_fiber: number; total_sugar: number; total_sodium: number;
 };
 
 // form field key -> API (camelCase) name -> label
@@ -125,10 +114,9 @@ function Nutrition() {
     const { start, end } = rangeRef.current;
     const stale = () => mine !== monthSeq.current || start !== rangeRef.current.start || end !== rangeRef.current.end;
     try {
-      const qs = new URLSearchParams({ startDate: start, endDate: end, tz: timeZone() });
-      const r = await api<{ logs: LogRow[] }>(`/nutrition/logs?${qs.toString()}`);
+      const rows = await listLogs({ startDate: start, endDate: end, tz: timeZone() });
       if (stale()) return;
-      setMonthLogs(r.logs); setMonthError("");
+      setMonthLogs(rows); setMonthError("");
     } catch (e) {
       if (stale()) return;
       setMonthLogs([]); setMonthError((e as Error).message);
@@ -176,8 +164,8 @@ function Nutrition() {
   const loadSummary = useCallback(async (date: string) => {
     const seq = ++summarySeq.current;
     try {
-      const r = await api<{ summary: Summary }>(`/nutrition/summary?${new URLSearchParams({ date, tz: timeZone() }).toString()}`);
-      if (seq === summarySeq.current) { setSummary(r.summary); setSummaryError(""); }
+      const s = await daySummary({ date, tz: timeZone() });
+      if (seq === summarySeq.current) { setSummary(s); setSummaryError(""); }
     } catch (e) {
       if (seq === summarySeq.current) { setSummary(null); setSummaryError((e as Error).message); }
     }
@@ -186,10 +174,8 @@ function Nutrition() {
   const loadLogs = useCallback(async () => {
     const start = new Date();
     start.setDate(start.getDate() - 30);
-    const qs = new URLSearchParams({ startDate: localDate(start), endDate: localDate(), tz: timeZone() });
     try {
-      const r = await api<{ logs: LogRow[] }>(`/nutrition/logs?${qs.toString()}`);
-      setLogs(r.logs); setLogsError("");
+      setLogs(await listLogs({ startDate: localDate(start), endDate: localDate(), tz: timeZone() })); setLogsError("");
     } catch (e) { setLogsError((e as Error).message); }
   }, []);
 
@@ -209,13 +195,12 @@ function Nutrition() {
     try {
       const start = new Date();
       start.setDate(start.getDate() - 30);
-      const qs = new URLSearchParams({ startDate: localDate(start), endDate: localDate(), tz: timeZone() });
       const [s, l] = await Promise.all([
-        api<{ summary: Summary }>(`/nutrition/summary?${new URLSearchParams({ date, tz: timeZone() }).toString()}`),
-        api<{ logs: LogRow[] }>(`/nutrition/logs?${qs.toString()}`),
+        daySummary({ date, tz: timeZone() }),
+        listLogs({ startDate: localDate(start), endDate: localDate(), tz: timeZone() }),
       ]);
-      if (seq === summarySeq.current) { setSummary(s.summary); setSummaryError(""); }
-      setLogs(l.logs); setLogsError("");
+      if (seq === summarySeq.current) { setSummary(s); setSummaryError(""); }
+      setLogs(l); setLogsError("");
     } catch (e) { setRefreshError(`Saved, but the totals and history could not refresh: ${(e as Error).message}`); }
     await loadMonth();
   }
@@ -285,7 +270,7 @@ function Nutrition() {
     try {
       if (editing) {
         // send only what changed
-        const body: Record<string, unknown> = {};
+        const body: NutritionInput = {};
         if (name !== text(editing.food_name)) body.foodName = name;
         if (unit !== text(editing.serving_unit)) body.servingUnit = unit;
         const before: Record<NumKey, unknown> = {
@@ -296,15 +281,15 @@ function Nutrition() {
           if (form[key].trim() !== round(before[key])) body[key] = values[key];
         }
         if (Object.keys(body).length === 0) { setError("Nothing was changed."); setBusy(false); return; }
-        const r = await api<{ message?: string }>(`/nutrition/log/${encodeURIComponent(String(editing.log_id))}`, { method: "PUT", body: JSON.stringify(body) });
-        setMessage(r.message || "Nutrition log updated");
+        await updateLog(editing.log_id, body);
+        setMessage("Nutrition log updated");
         setEditing(null); setForm(emptyForm());
       } else {
-        const body: Record<string, unknown> = { foodName: name, servingUnit: unit };
+        const body: NutritionInput = { foodName: name, servingUnit: unit };
         for (const { key } of NUMBER_FIELDS) if (values[key] !== null && values[key] !== undefined) body[key] = values[key];
         if (form.usdaFdcId) body.usdaFdcId = form.usdaFdcId;
-        const r = await api<{ message?: string }>("/nutrition/log", { method: "POST", body: JSON.stringify(body) });
-        setMessage(r.message || "Nutrition log entry created");
+        await addLog(body);
+        setMessage("Nutrition log entry created");
         setForm(emptyForm());
         // a new entry is logged for now, so show today's totals
         if (day !== localDate()) { setDay(localDate()); newDay = localDate(); }
@@ -319,8 +304,8 @@ function Nutrition() {
     if (!window.confirm(`Delete "${l.food_name}" from your food log?`)) return;
     setBusy(true); setError(""); setMessage(""); setRefreshError("");
     try {
-      const r = await api<{ message?: string }>(`/nutrition/log/${encodeURIComponent(String(l.log_id))}`, { method: "DELETE" });
-      setMessage(r.message || "Nutrition log deleted");
+      await deleteLog(l.log_id);
+      setMessage("Nutrition log deleted");
       if (editing && String(editing.log_id) === String(l.log_id)) { setEditing(null); setForm(emptyForm()); }
     } catch (e) { setError((e as Error).message); setBusy(false); return; }
     await refresh();

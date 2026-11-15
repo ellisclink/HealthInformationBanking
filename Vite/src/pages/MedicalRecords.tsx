@@ -3,9 +3,9 @@ import AlertBanner from "../components/AlertBanner";
 import HealthHistoryForm from "../components/HealthHistoryForm";
 import NavigationBar from "../components/NavigationBar";
 import SearchBar from "../components/SearchBar";
-import { api } from "../api";
 import { normalizeHealthHistory } from "../healthHistory";
 import { listMedications, type Med } from "../data/medications";
+import { getRecord } from "../data/records";
 
 // One row of the Records List, built from the patient's own data:
 //   - the Health History form (conditions, medications, allergies, immunizations, surgeries)
@@ -100,7 +100,7 @@ function MedicalRecords() {
     if (tab !== "list") return;
     let cancelled = false;
     Promise.all([
-      api<{ data: unknown; updated_at: string | null }>("/records"),
+      getRecord(),
       listMedications(),
     ])
       .then(([rec, meds]) => { if (!cancelled) { setRecords(buildRecords(rec.data, rec.updated_at, meds)); setError(""); } })

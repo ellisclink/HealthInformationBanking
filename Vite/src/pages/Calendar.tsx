@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import NavigationBar from "../components/NavigationBar";
 import { api, localDate } from "../api";
+import * as cal from "../data/calendar";
+import type { IcsFile } from "../data/calendar";
 
 // The calendar feed is served by the backend (Parse/cloud/app.js), not by the website. On Back4app set
 // VITE_FEED_BASE_URL to the backend's web address (App Settings > Domains, e.g. https://yourapp.b4a.app).
@@ -8,14 +10,16 @@ import { api, localDate } from "../api";
 const FEED_BASE = (String(import.meta.env.VITE_FEED_BASE_URL || "").trim() || window.location.origin).replace(/\/+$/, "");
 
 // Calendar: appointments, reminders and other events, including repeating ones.
-//   GET    /calendar/events?startDate=&endDate=&timeZone=  -> { events } (a repeating event comes back once per occurrence)
-//   GET    /calendar/upcoming?limit=&timeZone=             -> { events } (the next occurrences)
-//   GET    /calendar/events/:id                            -> { event } (the whole series, used for editing)
-//   POST   /calendar/events, PUT /calendar/events/:id      -> save (time_zone is sent every time)
-//   DELETE /calendar/events/:id                            -> delete the whole series
-//   DELETE /calendar/events/:id/occurrences/:date          -> skip one occurrence
-//   GET    /calendar/events/:id/ics, GET /calendar/ics     -> { ics, filename, content_type }
-// Everything from the server is shown as plain text.
+// The events are read and written with the Parse SDK (data/calendar.ts, the same answers as the old routes):
+//   cal.listEvents({startDate, endDate, timeZone})  -> { events } (a repeating event comes back once per occurrence)
+//   cal.upcomingEvents({limit, timeZone})          -> { events } (the next occurrences)
+//   cal.getEvent(id)                               -> { event } (the whole series, used for editing)
+//   cal.createEvent / cal.updateEvent              -> save (time_zone is sent every time)
+//   cal.removeEvent(id)                            -> delete the whole series
+//   cal.skipOccurrence(id, date)                   -> skip one occurrence
+//   cal.eventIcs(id), cal.calendarIcs()            -> { ics, filename, content_type } (written in the browser)
+// The subscribe links are still api /calendar/feed-tokens (the feed is served by the backend).
+// Everything is shown as plain text.
 
 const CATEGORIES = ["appointment", "medication", "reminder", "personal", "lab", "procedure"] as const;
 const STATUSES = ["scheduled", "completed", "cancelled"] as const;
@@ -42,7 +46,6 @@ type CalEvent = {
   exceptions: string[] | null;
   occurrence_date?: string;   // set on each row of a repeating event
 };
-type IcsReply = { ics: string; filename?: string; content_type?: string };
 // subscribe links (D-016): the token itself comes back only once, from the create call
 type FeedLink = {
   token_id: string; label: string | null; expires_at: string | null; revoked_at: string | null;
@@ -355,8 +358,7 @@ function Calendar() {
     const stale = () => mine !== monthSeq.current || start !== rangeRef.current.start || end !== rangeRef.current.end;
     try {
       // the server cuts days at UTC midnight, so ask for one extra day on each side; days are placed locally below
-      const qs = new URLSearchParams({ startDate: addDays(start, -1), endDate: addDays(end, 1), timeZone: timeZone(), limit: String(MONTH_LIMIT) });
-      const r = await api<{ events: CalEvent[] }>(`/calendar/events?${qs.toString()}`);
+      const r = await cal.listEvents({ startDate: addDays(start, -1), endDate: addDays(end, 1), timeZone: timeZone(), limit: MONTH_LIMIT });
       if (stale()) return;
       setMonthEvents(r.events); setMonthError("");
     } catch (e) {
@@ -408,9 +410,8 @@ function Calendar() {
     const mine = ++seq.current;
     const tz = timeZone();
     const [list, soon] = await Promise.all([
-      api<{ events: CalEvent[] }>(`/calendar/events?${new URLSearchParams({ startDate: start, endDate: end, timeZone: tz }).toString()}`),
-      api<{ events: CalEvent[] }>(`/calendar/upcoming?${new URLSearchParams({ limit: "10", timeZone: tz }).toString()}`)
-        .catch((e: Error) => e),
+      cal.listEvents({ startDate: start, endDate: end, timeZone: tz }),
+      cal.upcomingEvents({ limit: 10, timeZone: tz }).catch((e: Error) => e),
     ]);
     if (mine !== seq.current) return;
     setEvents(list.events);
@@ -456,7 +457,7 @@ function Calendar() {
     setBusy(true); setError(""); setMessage(""); setRefreshError("");
     try {
       // a list row is one occurrence; editing changes the whole series, so load the stored event
-      const r = await api<{ event: CalEvent }>(`/calendar/events/${encodeURIComponent(String(id))}`);
+      const r = await cal.getEvent(String(id));
       setEditingId(id); setForm(formFromEvent(r.event)); setFormOpen(true);
       setTimeout(() => document.getElementById("calendar-form")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
     } catch (e) { setError((e as Error).message); }
@@ -506,10 +507,7 @@ function Calendar() {
     setBusy(true);
     const wasEdit = editingId !== null;
     try {
-      const r = await api<{ message?: string }>(
-        wasEdit ? `/calendar/events/${encodeURIComponent(String(editingId))}` : "/calendar/events",
-        { method: wasEdit ? "PUT" : "POST", body: JSON.stringify(body) },
-      );
+      const r = wasEdit ? await cal.updateEvent(String(editingId), body) : await cal.createEvent(body);
       closeForm(); setForm(emptyForm());
       setMessage(r.message || (wasEdit ? "Event updated" : "Event created"));
     } catch (e) { setError((e as Error).message); setBusy(false); return; }
@@ -523,7 +521,7 @@ function Calendar() {
     if (!window.confirm(`${warn} This can't be undone.`)) return;
     setBusy(true); setError(""); setMessage(""); setRefreshError("");
     try {
-      const r = await api<{ message?: string }>(`/calendar/events/${encodeURIComponent(String(e.event_id))}`, { method: "DELETE" });
+      const r = await cal.removeEvent(String(e.event_id));
       setMessage(r.message || "Event deleted");
       if (editingId !== null && String(editingId) === String(e.event_id)) closeForm();
     } catch (err) { setError((err as Error).message); setBusy(false); return; }
@@ -536,21 +534,18 @@ function Calendar() {
     if (!window.confirm(`Skip only the ${fmtDate(e.occurrence_date)} occurrence of "${e.title}"? The other repeats stay.`)) return;
     setBusy(true); setError(""); setMessage(""); setRefreshError("");
     try {
-      const r = await api<{ message?: string }>(
-        `/calendar/events/${encodeURIComponent(String(e.event_id))}/occurrences/${encodeURIComponent(e.occurrence_date)}`,
-        { method: "DELETE" },
-      );
+      const r = await cal.skipOccurrence(String(e.event_id), e.occurrence_date);
       setMessage(r.message || "Occurrence skipped");
     } catch (err) { setError((err as Error).message); setBusy(false); return; }
     await refreshAfter("Skipped");
     setBusy(false);
   }
 
-  // The server sends the .ics text; save it as a file with the server's filename
-  async function download(path: string, fallbackName: string) {
+  // The .ics text is written in the browser (data/calendarRules.ts, the server's writer); save it as a file
+  async function download(make: () => Promise<IcsFile>, fallbackName: string) {
     setBusy(true); setError(""); setMessage(""); setRefreshError("");
     try {
-      const r = await api<IcsReply>(path);
+      const r = await make();
       const blob = new Blob([r.ics], { type: r.content_type || "text/calendar" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -681,7 +676,7 @@ function Calendar() {
           <div className="med-toolbar">
             <h3 id="cal-events">Events</h3>
             <div>
-              <button className="secondary-button" type="button" disabled={busy} onClick={() => download("/calendar/ics", "calendar.ics")}>
+              <button className="secondary-button" type="button" disabled={busy} onClick={() => download(() => cal.calendarIcs(), "calendar.ics")}>
                 Download whole calendar (.ics)
               </button>{" "}
               <button className="primary-button" type="button" disabled={busy} onClick={() => { if (formOpen) closeForm(); else openNew(); }}>
@@ -794,7 +789,7 @@ function Calendar() {
                       </button>
                     )}
                     <button className="secondary-button" type="button" disabled={busy}
-                      onClick={() => download(`/calendar/events/${encodeURIComponent(String(e.event_id))}/ics`, `event-${e.event_id}.ics`)}>
+                      onClick={() => download(() => cal.eventIcs(String(e.event_id)), `event-${e.event_id}.ics`)}>
                       Download .ics
                     </button>
                     <button className="text-button med-link danger" type="button" disabled={busy} onClick={() => removeEvent(e)}>Delete event</button>

@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import NavigationBar from "../components/NavigationBar";
-import { api, localDate } from "../api";
+import { localDate } from "../api";
+import {
+  listDevices, addDevice, updateDevice, removeDevice as deleteDevice, listSupplies, markReplaced,
+  listLogs, addLog, updateLog, removeLog as deleteLog, respiratorySummary,
+} from "../data/respiratory";
 
 // Breathing devices: CPAP and other pressure machines, oxygen, nebulizers and peak flow meters.
 // Each device has replaceable parts (with due dates) and daily or nightly entries.
-//   GET/POST /respiratory/devices, PUT/DELETE /respiratory/devices/:id
-//   GET /respiratory/devices/:id/supplies, POST /respiratory/supplies/:id/replaced
-//   GET/POST /respiratory/logs, PUT/DELETE /respiratory/logs/:id
-//   GET /respiratory/summary  (last 30 days)
+// Devices, parts and entries are read and saved with the Parse SDK (data/respiratory.ts), which also works out each
+// part's due status and the 30-day summary. Marking a part replaced is an edit of its last_replaced date.
 // Everything from the server is shown as plain text. Errors show the server's own message.
 
 type Device = {
@@ -176,9 +178,9 @@ function Respiratory() {
 
   const loadTop = useCallback(async () => {
     const [d, s] = await Promise.all([
-      api<{ devices: Device[] }>("/respiratory/devices"),
+      listDevices(),
       // the summary is an extra: the page still works without it, but say so instead of hiding it
-      api<Summary>("/respiratory/summary").then(
+      respiratorySummary().then(
         (r) => ({ summary: r, failed: false }),
         () => ({ summary: null, failed: true }),
       ),
@@ -193,8 +195,8 @@ function Respiratory() {
     if (!id) { setSupplies([]); setLogs([]); return; }
     const mine = ++detailRequest.current;
     const [s, l] = await Promise.all([
-      api<{ supplies: Supply[] }>(`/respiratory/devices/${encodeURIComponent(id)}/supplies`),
-      api<{ logs: Log[] }>(`/respiratory/logs?device_id=${encodeURIComponent(id)}&limit=30`),
+      listSupplies(id),
+      listLogs({ device_id: id, limit: 30 }),
     ]);
     if (mine !== detailRequest.current) return;   // a newer request is already on its way
     setSupplies(s.supplies); setLogs(l.logs);
@@ -293,11 +295,10 @@ function Respiratory() {
     let ok = "";
     try {
       if (editing && device) {
-        const r = await api<{ message?: string }>(`/respiratory/devices/${encodeURIComponent(String(device.device_id))}`,
-          { method: "PUT", body: JSON.stringify(body) });
+        const r = await updateDevice(String(device.device_id), body);
         ok = r.message || "Device updated";
       } else {
-        const r = await api<{ message?: string; device?: Device }>("/respiratory/devices", { method: "POST", body: JSON.stringify(body) });
+        const r = await addDevice(body);
         ok = r.message || "Device added";
         if (r.device) savedId = String(r.device.device_id);
       }
@@ -313,7 +314,7 @@ function Respiratory() {
     if (!window.confirm(`Remove ${device.name}? Its parts and all of its entries will be removed too. This can't be undone.`)) return;
     setBusy(true); setError(""); setMessage(""); closeForms();
     try {
-      const r = await api<{ message?: string }>(`/respiratory/devices/${encodeURIComponent(String(device.device_id))}`, { method: "DELETE" });
+      const r = await deleteDevice(String(device.device_id));
       setMessage(r.message || "Device removed");
     } catch (e) { setError((e as Error).message); setBusy(false); return; }
     try {
@@ -328,8 +329,7 @@ function Respiratory() {
   async function replacedToday(s: Supply) {
     setBusy(true); setError(""); setMessage("");
     try {
-      const r = await api<{ message?: string }>(`/respiratory/supplies/${encodeURIComponent(String(s.supply_id))}/replaced`,
-        { method: "POST", body: JSON.stringify({ date: localDate() }) });
+      const r = await markReplaced(String(s.supply_id), localDate());
       setMessage(r.message ? `${s.part_name}: ${r.message}` : `${s.part_name} marked as replaced today`);
     } catch (e) { setError((e as Error).message); setBusy(false); return; }
     await reload("Saved");
@@ -369,8 +369,8 @@ function Respiratory() {
     setBusy(true);
     try {
       const r = editingLog
-        ? await api<{ message?: string }>(`/respiratory/logs/${encodeURIComponent(String(editingLog.log_id))}`, { method: "PUT", body: JSON.stringify(body) })
-        : await api<{ message?: string }>("/respiratory/logs", { method: "POST", body: JSON.stringify(body) });
+        ? await updateLog(String(editingLog.log_id), body)
+        : await addLog(body);
       setMessage(r.message || (editing ? "Entry updated" : "Entry added"));
       setEntryOpen(false); setEditingLog(null); setEntry(emptyEntry());
     } catch (e) { setEntryError((e as Error).message); setBusy(false); return; }   // e.g. a night that already has an entry
@@ -382,7 +382,7 @@ function Respiratory() {
     if (!window.confirm(`Delete the entry for ${l.log_date}? This can't be undone.`)) return;
     setBusy(true); setError(""); setMessage("");
     try {
-      const r = await api<{ message?: string }>(`/respiratory/logs/${encodeURIComponent(String(l.log_id))}`, { method: "DELETE" });
+      const r = await deleteLog(String(l.log_id));
       setMessage(r.message || "Entry removed");
       if (editingLog && String(editingLog.log_id) === String(l.log_id)) { setEntryOpen(false); setEditingLog(null); }
     } catch (e) { setError((e as Error).message); setBusy(false); return; }

@@ -6,7 +6,7 @@ export const PARSE_APP_ID = parseConfig.appId;
 export const PARSE_JS_KEY = parseConfig.jsKey;
 export const PARSE_SERVER_URL = parseConfig.serverURL;
 
-export type DiaryEntry = {
+type DiaryEntry = {
   entry_id: string; entry_date: string; category: string; title: string;
   description: string | null; severity: number | null; mood: string | null;
   follow_up_needed: boolean;
@@ -14,7 +14,7 @@ export type DiaryEntry = {
 export type DiaryInput = Omit<DiaryEntry, 'entry_id'>;
 export type VitalType = {
   vital_type: string; display_name: string; default_unit: string;
-  is_dual_value: boolean; value_label: string; secondary_label: string | null;
+  is_dual_value: boolean; value_label: string | null; secondary_label: string | null;
 };
 export type VitalCard = {
   vital_type: string; display_name: string; unit: string;
@@ -61,7 +61,7 @@ export function localDate(d = new Date()) {
 
 // Every request goes to ONE Cloud Code function ("api" in Parse/cloud/main.js),
 // which checks the session and runs the same routes the old Node server had.
-// The pages still call api('/vitals', { method: 'POST', body: JSON.stringify(...) }).
+// The pages still call api('/share', { method: 'POST', body: JSON.stringify(...) }).
 // Medications are not here: they use the Parse SDK through data/medications.ts (D-025).
 type Reply = { status: number; error?: string; message?: string; [key: string]: unknown };
 

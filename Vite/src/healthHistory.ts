@@ -1,6 +1,6 @@
 // Health History form: one definition shared by the editable form (Medical Records
 // page) and the read-only view (what doctors and family see through a share code).
-// It's saved as the patient's record (PUT /api/records).
+// It's saved as the patient's record (MedicalRecord, with the Parse SDK: data/records.ts).
 //
 // Medications are NOT typed into this form any more: the form shows the patient's
 // Medications tracker (listMedications() in data/medications.ts), split into prescription and

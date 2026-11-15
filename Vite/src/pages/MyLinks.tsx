@@ -1,17 +1,13 @@
 import { useEffect, useState } from "react";
 import NavigationBar from "../components/NavigationBar";
-import { api } from "../api";
+import { listLinks, createLink, updateLink, removeLink, linkOpened } from "../data/links";
+import type { Link, LinkInput } from "../data/links";
 
 // Personal Link Repository: the patient's health-related websites in one place —
 // insurance portal, pharmacy, patient portals, lab results sites, device apps.
-// Links and phone numbers only; passwords are never stored (GET/POST /api/links).
+// Links and phone numbers only; passwords are never stored. Read and saved with the Parse SDK (data/links.ts).
 
-type Link = {
-  link_id: number; title: string; url: string; category: string; organization: string | null;
-  phone: string | null; member_id_hint: string | null; notes: string | null; is_favorite: boolean;
-  open_count: number; last_opened_at: string | null;
-};
-type Draft = { title: string; url: string; category: string; organization: string; phone: string; member_id_hint: string; notes: string; is_favorite: boolean };
+type Draft = LinkInput;
 
 const CATEGORIES: [string, string][] = [
   ["insurance", "Insurance"], ["pharmacy", "Pharmacy"], ["patient_portal", "Patient portal"],
@@ -28,16 +24,15 @@ function MyLinks() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  const [editing, setEditing] = useState<number | "new" | null>(null);
+  const [editing, setEditing] = useState<string | "new" | null>(null);
   const [draft, setDraft] = useState<Draft>(emptyDraft);
   const [filter, setFilter] = useState("");
 
   async function load() {
-    const r = await api<{ links: Link[] }>("/links");
-    setLinks(r.links);
+    setLinks(await listLinks());
   }
   useEffect(() => {
-    api<{ links: Link[] }>("/links").then((r) => setLinks(r.links))
+    listLinks().then(setLinks)
       .catch((e) => setError((e as Error).message)).finally(() => setLoading(false));
   }, []);
 
@@ -60,22 +55,22 @@ function MyLinks() {
     if (!draft.title.trim() || !draft.url.trim()) { setError("Enter a name and a web address."); return; }
     const body = { ...draft, title: draft.title.trim(), url: draft.url.trim() };
     act(async () => {
-      if (editing === "new") await api("/links", { method: "POST", body: JSON.stringify(body) });
-      else await api(`/links/${editing}`, { method: "PUT", body: JSON.stringify(body) });
+      if (editing === "new") await createLink(body);
+      else if (editing) await updateLink(editing, body);
       setEditing(null);
       return `${body.title} saved.`;
     });
   }
 
   const toggleFavorite = (l: Link) => act(async () => {
-    await api(`/links/${l.link_id}`, { method: "PUT", body: JSON.stringify({ is_favorite: !l.is_favorite }) });
+    await updateLink(l.link_id, { is_favorite: !l.is_favorite });
   });
   const remove = (l: Link) => {
     if (!window.confirm(`Delete the link "${l.title}"?`)) return;
-    act(async () => { await api(`/links/${l.link_id}`, { method: "DELETE" }); return `${l.title} deleted.`; });
+    act(async () => { await removeLink(l.link_id); return `${l.title} deleted.`; });
   };
   // count the visit; the link itself opens normally (new tab)
-  const opened = (l: Link) => { api(`/links/${l.link_id}/opened`, { method: "POST" }).catch(() => {}); };
+  const opened = (l: Link) => { linkOpened(l).catch(() => {}); };
 
   const set = (k: keyof Draft) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
     setDraft((d) => ({ ...d, [k]: e.target.value }));

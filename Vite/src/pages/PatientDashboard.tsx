@@ -4,20 +4,21 @@ import NavigationBar from "../components/NavigationBar";
 import ProfileCard from "../components/ProfileCard";
 import ShareButton from "../components/ShareButton";
 import { Link, useNavigate } from 'react-router-dom';
-import { api, currentName } from "../api";
+import { currentName } from "../api";
 import { listMedications } from "../data/medications";
+import { getRecord } from "../data/records";
 import { normalizeHealthHistory } from "../healthHistory";
 import { useEffect, useState } from "react";
 
 type Counts = { medications: number; allergies: number; immunizations: number; procedures: number };
 
 // Real counts for the 4 cards: active medications from the tracker (Parse SDK, data/medications.ts),
-// and the filled lines of the Health History form (GET /records). "Filled" is the same rule the
+// and the filled lines of the Health History form (data/records.ts getRecord). "Filled" is the same rule the
 // Medical Records list uses, so the numbers match what that page shows.
 async function loadCounts(): Promise<Counts> {
   const [meds, rec] = await Promise.all([
     listMedications(),
-    api<{ data: unknown; updated_at: string | null }>("/records"),
+    getRecord(),
   ]);
   const h = normalizeHealthHistory(rec.data);
   return {

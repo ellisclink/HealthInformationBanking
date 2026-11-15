@@ -2,7 +2,9 @@ import { useEffect, useState } from 'react';
 import MedicalNotice from "../components/MedicalNotice";
 import NavigationBar from '../components/NavigationBar';
 import VitalTrendChart from '../components/VitalTrendChart';
-import { api, type VitalCard, type VitalType } from '../api';
+import { type VitalCard, type VitalType } from '../api';
+import { vitalTypes } from '../data/vitalTypes';
+import { addReading, listReadings, quickLook, removeReading as deleteReading } from '../data/vitals';
 
 type BmiInfo = { category: string | null; note: string | null; age: number | null };
 type BmiToday = { measured_at?: string; source?: string; bmi_info?: BmiInfo };
@@ -47,14 +49,13 @@ function VitalSigns() {
   const type = types.find(t => t.vital_type === selected);
 
   async function refresh(period: string) {
-    const [result, recent] = await Promise.all([
-      api<{ cards: VitalCard[] }>(`/vitals/quick-look?range=${period}`), api<{ readings: HistoryRow[] }>('/vitals?limit=25'),
-    ]);
+    const [result, recent] = await Promise.all([quickLook(period), listReadings({ limit: 25 })]);
     setCards(result.cards); setHistory(recent.readings);
   }
   useEffect(() => {
-    Promise.all([api<{ types: VitalType[] }>('/vitals/types'), api<{ cards: VitalCard[] }>(`/vitals/quick-look?range=${range}`), api<{ readings: HistoryRow[] }>('/vitals?limit=25')])
-      .then(([t, c, h]) => { setTypes(t.types); setSelected(t.types[0]?.vital_type || ''); setCards(c.cards); setHistory(h.readings); })
+    const t: VitalType[] = vitalTypes();
+    Promise.all([quickLook(range), listReadings({ limit: 25 })])
+      .then(([c, h]) => { setTypes(t); setSelected(t[0]?.vital_type || ''); setCards(c.cards); setHistory(h.readings); })
       .catch(e => setError(e.message)).finally(() => setLoading(false));
   }, []);
 
@@ -62,11 +63,11 @@ function VitalSigns() {
     event.preventDefault(); setBusy(true); setError(''); setMessage('');
     try {
       if (!selected || !Number.isFinite(Number(value)) || value === '') throw new Error('Choose a type and enter a reading.');
-      const saved = await api<{ bmi?: { action: string; reason?: string } }>('/vitals', { method: 'POST', body: JSON.stringify({
+      const saved = await addReading({
         vital_type: selected, value_numeric: Number(value),
         ...(type?.is_dual_value ? { value_secondary: Number(secondary) } : {}),
-        ...(measured ? { measured_at: new Date(measured).toISOString() } : {}),
-      }) });
+        ...(measured ? { measured_at: new Date(measured) } : {}),
+      });
       await refresh(range); setValue(''); setSecondary(''); setMeasured('');
       setMessage(saved.bmi?.action === 'created' ? 'Reading saved. BMI was calculated from your weight and height.'
         : saved.bmi?.reason ? `Reading saved. BMI was not calculated: ${saved.bmi.reason}` : 'Reading saved.');
@@ -79,7 +80,7 @@ function VitalSigns() {
     if (!window.confirm(affectsBmi ? 'Remove this reading? Its calculated BMI will also be removed.' : "Remove this reading? This can't be undone.")) return;
     setRemoving(r.vital_log_id); setError(''); setMessage('');
     try {
-      await api(`/vitals/${r.vital_log_id}`, { method: 'DELETE' });
+      await deleteReading(r.vital_log_id);
       await refresh(range); setMessage('Reading removed.');
     } catch (e) { setError((e as Error).message); }
     finally { setRemoving(''); }

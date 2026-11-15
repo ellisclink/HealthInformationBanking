@@ -3,6 +3,7 @@ import AlertBanner from "../components/AlertBanner";
 import NavigationBar from "../components/NavigationBar";
 import MedicalNotice from "../components/MedicalNotice";
 import { api, apiFile, apiUpload, localDate } from "../api";
+import { addResults, fetchResults, labCatalog, labSummary, listResults, removeResult as deleteResult, updateResult } from "../data/labs";
 
 // Lab results: upload the PDF the lab gave you, type in the numbers, and see which
 // ones are out of range and what that means.
@@ -10,7 +11,8 @@ import { api, apiFile, apiUpload, localDate } from "../api";
 //   Add Results      type in one test or a whole panel (Lipid Panel, CBC, ...)
 //   All Results      every result, filter by test / out of range, edit or delete
 //   PDF Reports      upload, view, and link results to a report
-// The server decides normal / high / low (GET /api/labs/...).
+// The server decides normal / high / low when a result is saved (the LabResult trigger); the results, the summary and
+// the catalog are read with the Parse SDK (data/labs.ts, data/labCatalog.ts). The PDFs still use the api (/labs/reports).
 
 type Flag = "normal" | "low" | "high" | "critical_low" | "critical_high" | "abnormal" | null;
 type CatalogTest = {
@@ -19,7 +21,7 @@ type CatalogTest = {
   about: string | null;
 };
 type LabResult = {
-  result_id: number; report_id: number | null; test_code: string | null; test_name: string; panel: string | null;
+  result_id: string; report_id: string | null; test_code: string | null; test_name: string; panel: string | null;
   value_numeric: number | null; value_text: string | null; unit: string | null;
   ref_low: number | null; ref_high: number | null; ref_text: string | null;
   range_source: "report" | "catalog" | "none"; flag: Flag; collected_date: string; notes: string | null;
@@ -32,7 +34,7 @@ type Summary = {
   needs_attention: AttentionItem[]; latest: SummaryItem[];
 };
 type Report = {
-  report_id: number; title: string; report_date: string | null; lab_name: string | null; ordered_by: string | null;
+  report_id: string; title: string; report_date: string | null; lab_name: string | null; ordered_by: string | null;
   notes: string | null; file_name: string; file_size: number; is_encrypted: boolean; created_at: string;
   result_count: number; out_of_range_count: number;
 };
@@ -108,7 +110,7 @@ const emptyRow = (): Row => ({ test_code: "", test_name: "", value: "", unit: ""
 
 function LabResults() {
   const [tab, setTab] = useState<Tab>("attention");
-  const [catalog, setCatalog] = useState<CatalogTest[]>([]);
+  const [catalog] = useState<CatalogTest[]>(() => labCatalog());   // the catalog is part of the website (data/labCatalog.ts)
   const [summary, setSummary] = useState<Summary | null>(null);
   const [results, setResults] = useState<LabResult[]>([]);
   const [reports, setReports] = useState<Report[]>([]);
@@ -125,7 +127,7 @@ function LabResults() {
   // all-results filters / editing
   const [testFilter, setTestFilter] = useState("");
   const [onlyOut, setOnlyOut] = useState(false);
-  const [editId, setEditId] = useState<number | null>(null);
+  const [editId, setEditId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const [editDate, setEditDate] = useState("");
 
@@ -136,21 +138,20 @@ function LabResults() {
   const [upLab, setUpLab] = useState("");
   const [upOrdered, setUpOrdered] = useState("");
   const [fileInputKey, setFileInputKey] = useState(0);
-  const [viewing, setViewing] = useState<{ id: number; url: string } | null>(null);
+  const [viewing, setViewing] = useState<{ id: string; url: string } | null>(null);
 
-  const fetchAll = () => Promise.all([
-    api<Summary>("/labs/summary"),
-    api<{ results: LabResult[] }>("/labs/results"),
-    api<{ reports: Report[] }>("/labs/reports"),
-  ]);
+  const fetchAll = async (): Promise<[Summary, { results: LabResult[] }, { reports: Report[] }]> => {
+    const [rows, rp] = await Promise.all([fetchResults(), api<{ reports: Report[] }>("/labs/reports")]);
+    return [labSummary(rows, rp.reports.length), listResults(rows), rp];
+  };
   async function load() {
     const [s, r, rp] = await fetchAll();
     setSummary(s); setResults(r.results); setReports(rp.reports);
   }
 
   useEffect(() => {
-    Promise.all([api<{ tests: CatalogTest[] }>("/labs/catalog"), fetchAll()])
-      .then(([c, [s, r, rp]]) => { setCatalog(c.tests); setSummary(s); setResults(r.results); setReports(rp.reports); })
+    fetchAll()
+      .then(([s, r, rp]) => { setSummary(s); setResults(r.results); setReports(rp.reports); })
       .catch((e) => setError((e as Error).message))
       .finally(() => setLoading(false));
   }, []);
@@ -215,7 +216,7 @@ function LabResults() {
     }
     const body = {
       collected_date: collected,
-      ...(reportFor ? { report_id: Number(reportFor) } : {}),
+      ...(reportFor ? { report_id: reportFor } : {}),
       results: filled.map((r) => ({
         ...(r.test_code === OTHER ? { test_name: r.test_name.trim() } : { test_code: r.test_code }),
         value: r.value.trim(),
@@ -227,7 +228,7 @@ function LabResults() {
       })),
     };
     act(async () => {
-      const r = await api<{ message: string; out_of_range: unknown[] }>("/labs/results", { method: "POST", body: JSON.stringify(body) });
+      const r = await addResults(body);
       setRows([emptyRow()]); setReportFor("");
       setTab(r.out_of_range.length ? "attention" : "all");
       return r.message + ".";
@@ -243,13 +244,13 @@ function LabResults() {
     setEditId(r.result_id); setEditValue(r.value_numeric != null ? fmt(r.value_numeric) : r.value_text ?? ""); setEditDate(r.collected_date);
   }
   const saveEdit = (r: LabResult) => act(async () => {
-    await api(`/labs/results/${r.result_id}`, { method: "PUT", body: JSON.stringify({ value: editValue, collected_date: editDate }) });
+    await updateResult(r.result_id, { value: editValue, collected_date: editDate });
     setEditId(null);
     return `${r.test_name} updated.`;
   });
   const removeResult = (r: LabResult) => {
     if (!window.confirm(`Delete the ${r.test_name} result from ${dateLabel(r.collected_date)}?`)) return;
-    act(async () => { await api(`/labs/results/${r.result_id}`, { method: "DELETE" }); return `${r.test_name} result deleted.`; });
+    act(async () => { await deleteResult(r.result_id); return `${r.test_name} result deleted.`; });
   };
 
   // ---------- reports ----------

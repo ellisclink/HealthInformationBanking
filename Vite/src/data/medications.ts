@@ -9,6 +9,7 @@ import Parse from "../parse";
 import { run } from "./parseCall";
 import { withInventoryInfo, summarize } from "./medicationMath";
 import type { Med, MedRow, Dose, Refill, Summary } from "./medicationMath";
+import { MAX_ROWS, ownerAcl } from "./common";
 
 export type { Med, MedRow, Dose, Refill, Summary };
 
@@ -40,7 +41,6 @@ const MED_FIELDS = ["user_id", "medication_name", "medication_type", "brand_name
   "discontinued_reason", "quantity_on_hand", "refill_threshold", "refills_remaining", "last_refill_date", "source", "notes"] as const;
 
 const DAY_MS = 86400000;
-const MAX_ROWS = 10000;   // same cap as findAll() on the server
 const RECENT_DOSES = 20;  // getById(): the 20 newest doses
 
 const iso = (v: unknown): string | null => (v instanceof Date ? v.toISOString() : v === undefined || v === null ? null : (v as string));
@@ -71,16 +71,6 @@ function refillRow(o: Parse.Object): Refill {
     refill_id: o.id, refill_date: o.get("refill_date"), quantity_added: Number(o.get("quantity_added")),
     pharmacy_name: o.get("pharmacy_name") ?? null,
   };
-}
-
-// owner read + write, nothing public (the server sets the same ACL anyway, D-019)
-function ownerAcl(): Parse.ACL {
-  const acl = new Parse.ACL();
-  acl.setPublicReadAccess(false);
-  acl.setPublicWriteAccess(false);
-  const user = Parse.User.current();
-  if (user) { acl.setReadAccess(user, true); acl.setWriteAccess(user, true); }
-  return acl;
 }
 
 const getMedication = (id: string) => new Parse.Query("Medication").get(id);

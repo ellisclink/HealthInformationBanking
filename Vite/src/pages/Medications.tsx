@@ -8,6 +8,7 @@ import {
   listMedications, medicationSummary, getHistory, addMedication as saveMedication, updateMedication, deleteMedication,
   logDose as saveDose, addRefill as saveRefill,
 } from "../data/medications";
+import { acknowledgeAlert, listAlerts } from "../data/safety";
 import type { Med, Dose, Refill, Summary, NewMedication } from "../data/medications";
 
 // Medication inventory: what the patient takes and how many pills they have.
@@ -15,15 +16,16 @@ import type { Med, Dose, Refill, Summary, NewMedication } from "../data/medicati
 //   "Took dose"  -> a new DoseLog (the server subtracts the dose from the count)
 //   "Add refill" -> a new Refill  (the server adds to the count)
 // The low-stock check and run-out estimate are in data/medicationMath.ts.
-// Safety: GET /api/safety/alerts checks every medication against the allergies on the
-// Health History form and against each other; POST /api/safety/check runs the same check
+// Safety: listAlerts() (data/safety.ts) has the server re-check every medication against the allergies
+// on the Health History form and against each other (POST /api/safety/recheck), then reads the warnings
+// with the Parse SDK; acknowledging one is a Parse SDK edit. POST /api/safety/check runs the same check
 // on a new medication before it is saved.
 
 type SafetyWarning = {
   alert_type: "allergy" | "cross_reactivity" | "interaction" | "duplicate_therapy";
   severity: "major" | "moderate" | "minor"; title: string; message: string; advice: string;
 };
-type SafetyAlert = SafetyWarning & { alert_id: number; acknowledged_at: string | null; acknowledged_note: string | null };
+type SafetyAlert = SafetyWarning & { alert_id: string; acknowledged_at: string | null; acknowledged_note: string | null };
 const SEVERITY_LABEL = { major: "Serious", moderate: "Caution", minor: "Low risk" } as const;
 const TYPE_LABEL = { allergy: "Allergy", cross_reactivity: "Possible allergy", interaction: "Interaction", duplicate_therapy: "Doubling up" } as const;
 
@@ -62,7 +64,7 @@ const emptyNew = {
 };
 
 // safety warnings are extra: if that module isn't installed, the page still works
-const loadAlerts = () => api<{ alerts: SafetyAlert[] }>("/safety/alerts").then((r) => r.alerts).catch(() => [] as SafetyAlert[]);
+const loadAlerts = () => listAlerts().then((r): SafetyAlert[] => r.alerts).catch(() => [] as SafetyAlert[]);
 // (the version and note about the built-in warning list are fixed text on the page; the server sends the same text in `reference`)
 
 // the list, the summary (built from the list) and the safety alerts
@@ -152,7 +154,7 @@ function Medications() {
   }
 
   const acknowledge = (a: SafetyAlert, acknowledged: boolean) => act(async () => {
-    await api(`/safety/alerts/${a.alert_id}/acknowledge`, { method: "POST", body: JSON.stringify({ acknowledged }) });
+    await acknowledgeAlert(a.alert_id, acknowledged);
   });
 
   const logDose = (m: Med, status: "taken" | "skipped") => act(async () => {

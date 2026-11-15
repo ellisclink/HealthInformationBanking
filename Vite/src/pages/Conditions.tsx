@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import NavigationBar from "../components/NavigationBar";
-import { api, localDate } from "../api";
+import { localDate } from "../api";
 import type { VitalType } from "../api";
+import { vitalTypes as allVitalTypes } from "../data/vitalTypes";
 import {
   listConditions, getConditionDetail, addCondition, updateCondition, deleteCondition, addNote as saveNote, setTarget, setByText,
   type Condition, type Note, type Target, type Summary, type ConditionInput, type TargetInput,
@@ -10,7 +11,7 @@ import {
 // Conditions: the patient's health conditions, with notes and vital-sign targets for each.
 // Condition, ConditionNote and ConditionTarget are read and saved with the Parse SDK (data/conditions.ts); the summary
 // (counts, active conditions with their own note count and last note date) is worked out on the page from that list.
-//   GET  /vitals/types               -> the vital types a target can be set for (reference data, still a server route)
+// The vital types a target can be set for are reference data in the site itself (data/vitalTypes.ts).
 // Everything from the server is shown as plain text.
 
 const CATEGORIES = ["chronic", "acute", "allergy", "mental_health", "injury", "surgical", "other"] as const;
@@ -56,8 +57,7 @@ function range(lo: unknown, hi: unknown) {
 function Conditions() {
   const [conditions, setConditions] = useState<Condition[]>([]);
   const [summary, setSummary] = useState<Summary | null>(null);
-  const [vitalTypes, setVitalTypes] = useState<VitalType[]>([]);
-  const [typesError, setTypesError] = useState("");
+  const [vitalTypes] = useState<VitalType[]>(() => allVitalTypes());
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -93,10 +93,6 @@ function Conditions() {
   }
 
   useEffect(() => {
-    // the vital types are an extra: the list still works without them
-    api<{ types: VitalType[] }>("/vitals/types")
-      .then((t) => setVitalTypes(t.types))
-      .catch((e: Error) => setTypesError(e.message));
     listConditions()
       .then(({ conditions: list, summary: counts }) => { setConditions(list); setSummary(counts); })
       .catch((e: Error) => setError(e.message))
@@ -459,7 +455,6 @@ function Conditions() {
 
                             <form className="med-add" onSubmit={addTarget} noValidate>
                               <h4>Add target</h4>
-                              {typesError && <p className="notice error" role="alert">{typesError}</p>}
                               {targetError && <p className="notice error" role="alert">{targetError}</p>}
                               <div className="med-add-grid">
                                 <label>Vital sign *

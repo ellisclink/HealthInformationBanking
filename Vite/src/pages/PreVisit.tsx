@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
 import NavigationBar from "../components/NavigationBar";
 import MedicalNotice from "../components/MedicalNotice";
-import { api } from "../api";
+import { previsitAppointments } from "../data/calendar";
+import { previsitSummary } from "../data/previsit";
 
 // Pre-visit summary: pick an appointment (or none), add why you're going and your questions, and get a one-page
 // summary of your medicines, conditions, labs, vitals and diary to print, copy or bring along.
-//   GET  /previsit/appointments      POST /previsit/summary
-// Everything from the server is shown as plain text.
+//   previsitAppointments() (data/calendar.ts: your upcoming appointments, read directly)
+//   previsitSummary() (data/previsit.ts: built in the browser from your own records)
+// Everything is shown as plain text.
 
 type Appt = { event_id: string; title: string; start_time: string; provider_name: string | null };
 type Summary = { text: string; worth_raising: string[]; period: { days: number; from: string; to: string } };
@@ -24,17 +26,17 @@ function PreVisit() {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    api<{ appointments: Appt[] }>("/previsit/appointments").then((r) => setAppts(r.appointments)).catch((e) => setError((e as Error).message));
+    previsitAppointments().then((r) => setAppts(r.appointments)).catch((e) => setError((e as Error).message));
   }, []);
 
   async function make(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true); setError(""); setNote("");
     try {
-      const r = await api<{ summary: Summary }>("/previsit/summary", { method: "POST", body: JSON.stringify({
+      const r = await previsitSummary({
         ...(eventId ? { event_id: eventId } : {}), reason, concerns, days,
         questions: questions.split("\n").map((q) => q.trim()).filter(Boolean),
-      }) });
+      });
       setSummary(r.summary);
     } catch (err) { setError((err as Error).message); }
     finally { setBusy(false); }

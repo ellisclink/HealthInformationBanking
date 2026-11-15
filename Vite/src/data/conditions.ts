@@ -10,6 +10,7 @@ import Parse from "../parse";
 import { run } from "./parseCall";
 import { summarize, sortConditions } from "./conditionSummary";
 import type { Condition, Note, Target, Summary, ActiveCondition } from "./conditionSummary";
+import { MAX_ROWS, ownerAcl, isBlank, textOrNull } from "./common";
 
 export type { Condition, Note, Target, Summary, ActiveCondition };
 export { setByText } from "./conditionSummary";
@@ -26,13 +27,11 @@ export type TargetInput = {
   vital_type: string; target_min: number | null; target_max: number | null; secondary_min?: number | null; secondary_max?: number | null;
 };
 
-const MAX_ROWS = 10000;   // same cap as findAll() on the server
 
 const dateText = (v: unknown): string | null => {
   const s = v instanceof Date ? v.toISOString() : typeof v === "string" ? v : "";
   return s ? s.slice(0, 10) : null;
 };
-const textOrNull = (v: unknown): string | null => (typeof v === "string" && v !== "" ? v : null);
 const numOrNull = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const created = (o: Parse.Object) => (o.createdAt ? o.createdAt.toISOString() : "");
 
@@ -57,17 +56,6 @@ function toTarget(o: Parse.Object): Target {
     secondary_min: numOrNull(o.get("secondary_min")), secondary_max: numOrNull(o.get("secondary_max")),
     set_by: textOrNull(o.get("set_by")), active: o.get("active") === true, created_at: created(o) };
 }
-
-// owner read + write, nothing public (the server sets the same ACL anyway)
-function ownerAcl(): Parse.ACL {
-  const acl = new Parse.ACL();
-  acl.setPublicReadAccess(false);
-  acl.setPublicWriteAccess(false);
-  const user = Parse.User.current();
-  if (user) { acl.setReadAccess(user, true); acl.setWriteAccess(user, true); }
-  return acl;
-}
-const isBlank = (v: unknown) => v === undefined || v === null || v === "";
 
 // a new row: blank fields are not sent; the owner ACL is
 async function createRow(className: string, fields: Record<string, unknown>) {

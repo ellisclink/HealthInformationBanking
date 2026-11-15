@@ -2,26 +2,13 @@ import { useCallback, useEffect, useState } from "react";
 import AlertBanner from "../components/AlertBanner";
 import NavigationBar from "../components/NavigationBar";
 import { api } from "../api";
+import { emergencyPreview, getEmergency, saveEmergency, type Settings, type SettingsReply } from "../data/emergency";
 
 // Emergency access: what an emergency responder may see, your DNR / declined-treatment wishes, and the emergency code.
-//   GET/PUT /emergency/settings     GET /emergency/preview     POST/DELETE /emergency/code     GET /emergency/access-log
+//   the settings and the preview: data/emergency.ts (EmergencyProfile with the Parse SDK; the preview is built from your own rows)
+//   GET/POST/DELETE /emergency/code     GET /emergency/access-log     GET /documents (the server keeps these)
 // Responders open the code at /emergency-access (no account). Everything from the server is shown as plain text.
 
-type Contact = { name: string; phone: string; relationship: string | null };
-type Settings = {
-  enabled: boolean; sections: string[]; blood_type: string | null; medical_notes: string | null; contacts: Contact[];
-  code_status: string; declined_measures: string[]; directive_notes: string | null; polst_on_file: boolean;
-  directive_document_id: string | null; share_directive_document: boolean; directive_updated_at: string | null;
-};
-type SettingsReply = {
-  settings: Settings;
-  access: { has_code: boolean; code: string | null; created_at: string | null; last_opened_at: string | null; open_count: number };
-  options: {
-    code_statuses: { value: string; label: string }[]; measures: { value: string; label: string }[];
-    implied_by_status: Record<string, string[]>; sections: string[]; blood_types: string[]; max_contacts: number;
-  };
-  disclaimer: string;
-};
 type LogEntry = { accessed_at: string; action: string; responder_name: string; agency: string | null; badge_id: string | null; reason: string | null };
 type Doc = { document_id: string; title: string; category: string };
 type Preview = Record<string, unknown> & { directives?: { alert: string } | null };
@@ -44,7 +31,7 @@ function Emergency() {
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(() => Promise.all([
-    api<SettingsReply>("/emergency/settings"),
+    getEmergency(),
     api<{ documents: Doc[] }>("/documents?category=advance_directive"),
     api<{ entries: LogEntry[] }>("/emergency/access-log"),
   ]).then(([s, d, l]) => { setData(s); setForm(s.settings); setDocs(d.documents); setLog(l.entries); }), []);
@@ -64,16 +51,16 @@ function Emergency() {
   }
   const save = () => run(async () => {
     const f = form!;
-    const r = await api<{ settings: Settings }>("/emergency/settings", { method: "PUT", body: JSON.stringify({
+    const r = await saveEmergency({
       enabled: f.enabled, sections: f.sections, blood_type: f.blood_type, medical_notes: f.medical_notes, contacts: f.contacts.filter((c) => c.name && c.phone),
       code_status: f.code_status, declined_measures: f.declined_measures, directive_notes: f.directive_notes, polst_on_file: f.polst_on_file,
       directive_document_id: f.directive_document_id, share_directive_document: f.share_directive_document,
-    }) });
+    });
     setForm(r.settings); await load();
   }, "Emergency settings saved");
   const newCode = () => run(async () => { await api("/emergency/code", { method: "POST" }); await load(); }, "New emergency code created. The old one no longer works.");
   const turnOff = () => run(async () => { await api("/emergency/code", { method: "DELETE" }); await load(); }, "Emergency code turned off");
-  const showPreview = () => run(async () => { setPreview((await api<{ preview: Preview }>("/emergency/preview")).preview); }, "This is what a responder sees with your saved settings.");
+  const showPreview = () => run(async () => { setPreview((await emergencyPreview()).preview as Preview); }, "This is what a responder sees with your saved settings.");
 
   return (
     <>

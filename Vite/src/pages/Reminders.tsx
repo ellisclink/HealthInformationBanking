@@ -1,14 +1,17 @@
 import { useEffect, useState } from "react";
 import NavigationBar from "../components/NavigationBar";
-import { api } from "../api";
 import { listMedications } from "../data/medications";
+import { listDevices, listSupplies } from "../data/respiratory";
+import { createReminder, listReminders, removeReminder, updateReminder } from "../data/reminders";
+import { getSettings, putSettings } from "../data/notifications";
+import { listEvents } from "../data/calendar";
 
 // Reminders: repeating or one-time reminders (medicine, refill, appointment, device part, custom)
 // and the switches for the automatic alerts.
-//   GET/POST /reminders, PUT/DELETE /reminders/:id
-//   GET/PUT /notifications/settings
+//   reminders: data/reminders.ts (list, add, edit, turn off / on, remove: the Parse SDK)
+//   automatic alert settings: data/notifications.ts (getSettings, putSettings: the Parse SDK)
 // Snooze is on the notification bell, not on this page.
-// Linked items: listMedications() (data/medications.ts), GET /respiratory/devices (+ /:id/supplies), GET /calendar/events.
+// Linked items: listMedications() (data/medications.ts), listDevices() + listSupplies() (data/respiratory.ts), listEvents() (data/calendar.ts).
 
 type ReminderType = "medication" | "refill" | "appointment" | "device_supply" | "custom";
 type Freq = "daily" | "weekly" | "once";
@@ -179,21 +182,21 @@ function Reminders() {
   const [settingsError, setSettingsError] = useState("");
 
   async function loadReminders() {
-    const r = await api<{ reminders: Reminder[] }>("/reminders");
+    const r = await listReminders();
     setReminders(r.reminders || []);
   }
 
   useEffect(() => {
     let alive = true;
-    api<{ reminders: Reminder[] }>("/reminders")
+    listReminders()
       .then((r) => { if (alive) setReminders(r.reminders || []); })
       .catch((e) => { if (alive) setError(errText(e)); })
       .finally(() => { if (alive) setLoading(false); });
 
-    api<{ settings?: Partial<Settings> } & Partial<Settings>>("/notifications/settings")
+    getSettings()
       .then((r) => {
         if (!alive) return;
-        const s = r.settings ?? r;
+        const s = r.settings;
         setSettings({
           low_stock: !!s.low_stock, appointments: !!s.appointments, supplies: !!s.supplies,
           disposal: !!s.disposal, email: !!s.email,
@@ -205,11 +208,11 @@ function Reminders() {
     const failed: string[] = [];
     Promise.all([
       listMedications().catch(() => { failed.push("medicines"); return [] as MedOption[]; }),
-      api<{ events: EventOption[] }>("/calendar/events").then((r) => r.events || []).catch(() => { failed.push("appointments"); return [] as EventOption[]; }),
-      api<{ devices: Device[] }>("/respiratory/devices").then((r) => r.devices || []).catch(() => { failed.push("devices"); return [] as Device[]; }),
+      listEvents().then((r): EventOption[] => r.events || []).catch(() => { failed.push("appointments"); return [] as EventOption[]; }),
+      listDevices().then((r): Device[] => r.devices || []).catch(() => { failed.push("devices"); return [] as Device[]; }),
     ]).then(async ([m, ev, dev]) => {
       const sup = (await Promise.all(dev.map((d) =>
-        api<{ supplies: Supply[] }>(`/respiratory/devices/${encodeURIComponent(String(d.device_id))}/supplies`)
+        listSupplies(String(d.device_id))
           .then((r) => (r.supplies || []).map((s) => ({ ...s, device_id: d.device_id })))
           .catch(() => { if (!failed.includes("device parts")) failed.push("device parts"); return [] as Supply[]; }),
       ))).flat();
@@ -306,8 +309,8 @@ function Reminders() {
     setBusy(true);
     try {
       const r = editing
-        ? await api<{ message?: string }>(`/reminders/${encodeURIComponent(editing.reminder_id)}`, { method: "PUT", body: JSON.stringify(body) })
-        : await api<{ message?: string }>("/reminders", { method: "POST", body: JSON.stringify(body) });
+        ? await updateReminder(editing.reminder_id, body)
+        : await createReminder(body);
       closeForm();
       setMessage(r.message || (editing ? "Reminder updated" : "Reminder added"));
     } catch (e) { setFormError(errText(e)); setBusy(false); return; }
@@ -319,7 +322,7 @@ function Reminders() {
   async function toggleActive(r: Reminder) {
     setBusy(true); setError(""); setMessage(""); setRefreshError("");
     try {
-      await api(`/reminders/${encodeURIComponent(r.reminder_id)}`, { method: "PUT", body: JSON.stringify({ active: !r.active }) });
+      await updateReminder(r.reminder_id, { active: !r.active });
       setMessage(r.active ? `"${r.title}" turned off` : `"${r.title}" turned on`);
     } catch (e) { setError(errText(e)); setBusy(false); return; }
     try { await loadReminders(); }
@@ -331,7 +334,7 @@ function Reminders() {
     if (!window.confirm(`Delete the reminder "${r.title}"?`)) return;
     setBusy(true); setError(""); setMessage(""); setRefreshError("");
     try {
-      const res = await api<{ message?: string }>(`/reminders/${encodeURIComponent(r.reminder_id)}`, { method: "DELETE" });
+      const res = await removeReminder(r.reminder_id);
       if (editing?.reminder_id === r.reminder_id) closeForm();
       setMessage(res.message || "Reminder removed");
     } catch (e) { setError(errText(e)); setBusy(false); return; }
@@ -348,7 +351,7 @@ function Reminders() {
     setSettings((s) => (s ? { ...s, [key]: value } : s));
     setPending((p) => [...p, key]);
     try {
-      await api("/notifications/settings", { method: "PUT", body: JSON.stringify({ [key]: value }) });
+      await putSettings({ [key]: value });
     } catch (e) {
       setSettings((s) => (s ? { ...s, [key]: before } : s));
       setSettingsError(errText(e));
