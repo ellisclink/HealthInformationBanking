@@ -11,6 +11,7 @@
 // Other functions (run them from the Back4app dashboard > API Console with the Master Key):
 //   setup                                          re-apply the class permissions
 //   verifyLocked                                   check that every class is locked (expects {ok: true})
+//   verifySettings                                 check account lockout, password policy and session settings (expects {ok: true})
 //   seedDemo                                       create the demo patient (made-up data)
 // Job (the Back4app job "sendReminders" runs every 15 minutes: schedule it in the dashboard under Jobs;
 // the local server's own timer runs it every 5 minutes):
@@ -100,6 +101,9 @@ Parse.Cloud.define("debugClientIp", (request) => ({ request_ip: request.ip || nu
 Parse.Cloud.define("setup", () => ensureSetup(true), { requireMaster: true });
 // Lists every class that is NOT locked to the master key ({ok: true, problems: []} means all are locked). Run it after setup and after every deploy.
 Parse.Cloud.define("verifyLocked", () => require("./lib/setup").auditLocks(), { requireMaster: true });
+// Compares Parse's own security settings (account lockout, password policy, sessions) with lib/serverSettings.js EXPECTED.
+// {ok: true, problems: []} means they match. Run it after changing Parse Server Options on Back4app.
+Parse.Cloud.define("verifySettings", () => require("./lib/serverSettings").checkSettings(), { requireMaster: true });
 Parse.Cloud.define("seedDemo", () => require("./lib/seed").seedDemo(), { requireMaster: true });
 
 // Reminders and alerts: run every 15 minutes on Back4app (a scheduled job); local-server.js runs it on a 5-minute timer.
