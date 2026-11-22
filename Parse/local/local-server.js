@@ -73,6 +73,18 @@ async function main() {
     // Locks an account for 15 minutes after 5 wrong passwords. This also covers calls made straight to Parse's /login,
     // which the app's own rate limits (cloud/lib/security.js) never see. On Back4app turn on the same setting (README).
     accountLockout: { duration: 15, threshold: 5, unlockOnPasswordReset: true },
+    // Parse's own password rules, checked on every password Parse saves (sign-up, reset, and Cloud Code saves too). A floor
+    // under password.js: the pattern is PARSE_POLICY_PATTERN there. doNotAllowUsername: the email (username) can't be part
+    // of the password. maxPasswordHistory: a reset can't go back to any of the last 5 passwords. Set the same on Back4app (README).
+    passwordPolicy: {
+      validatorPattern: new RegExp(require("../cloud/lib/password").PARSE_POLICY_PATTERN),
+      validationError: "Password must be 10 to 128 characters and use more than one kind of character.",
+      doNotAllowUsername: true,
+      maxPasswordHistory: 5,
+    },
+    // Sessions: Parse's own limits match the app's (the app also ends a session after 30 idle minutes, auth.checkSession)
+    expireInactiveSessions: true,
+    enableAnonymousUsers: false,
   });
   await server.start();
 
