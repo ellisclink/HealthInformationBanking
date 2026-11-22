@@ -61,4 +61,10 @@ function problems(password, who = {}) {
 // the first problem as one sentence (what the server returns), or null when the password is fine
 const firstProblem = (password, who) => { const p = problems(password, who); return p.length ? `${p[0]}. ${p.length > 1 ? "See the password tips for more." : ""}`.trim() : null; };
 
-module.exports = { problems, firstProblem, MIN_LENGTH, MAX_LENGTH, COMMON };
+// Parse Server's own password policy (passwordPolicy.validatorPattern on Back4app and in local-server.js). It is a floor
+// that Parse checks on EVERY password it saves, including saves by Cloud Code: 10 to 128 characters, and not made of
+// only one kind of character (only lower case, only upper case, only digits or only symbols). It is deliberately looser
+// than the rules above, so it never refuses a password they accept; this file stays the real check.
+const PARSE_POLICY_PATTERN = "^(?!(?:[a-z]+|[A-Z]+|[0-9]+|[^A-Za-z0-9]+)$)[\\s\\S]{10,128}$";
+
+module.exports = { problems, firstProblem, MIN_LENGTH, MAX_LENGTH, COMMON, PARSE_POLICY_PATTERN };
