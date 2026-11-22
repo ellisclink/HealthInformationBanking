@@ -24,6 +24,7 @@ const sec = require("./security");
 const legal = require("./legal");
 const password = require("./password");
 const { clientIp } = require("./clientip");
+const serverSettings = require("./serverSettings");
 
 const CODE_TTL_MIN = 10;
 const MAX_CODE_ATTEMPTS = 5;
@@ -135,13 +136,21 @@ async function login(body, ctx) {
     return tooMany(emailKey, "failed logins for this account");
   }
 
-  // checks the password without starting a session (the session comes after the code)
+  // checks the password without starting a session (the session comes after the code). This goes through Parse's own
+  // password check, so Parse's account lockout (5 wrong passwords = locked 15 minutes) counts these attempts too.
   let user = null;
   try {
     await Parse.User.verifyPassword(cleanEmail, password);
     user = await userByEmail(cleanEmail);
-  } catch {
+  } catch (err) {
     user = null;
+    // Parse has locked this account. Same answer as our own limit above, which any email gets after 5 tries, so this
+    // doesn't tell anyone whether the account exists.
+    if (/account is locked/i.test(String((err && err.message) || ""))) {
+      await sec.refund(ipKey);
+      await audit({ event: "login_locked", ip: ctx.ip, detail: { email: cleanEmail, by: "parse_lockout" } });
+      return { status: 429, error: "too many failed logins for this account — try again in 15 minute(s)" };
+    }
   }
   if (!user) {
     // already counted above
@@ -291,9 +300,23 @@ async function reset(body, ctx) {
   try {
     user.setPassword(newPassword);
     await user.save(null, M);
+  } catch (err) {
+    // Parse's password policy refused it (too weak for Parse's own pattern, contains the email, or one of the last
+    // 5 passwords). Say why; the code still works, so the patient can pick another password.
+    if (err && err.code === Parse.Error.VALIDATION_ERROR) return { status: 400, error: err.message };
+    return failed("saving the new password", err);
+  }
+  try {
     await endAllSessions(user.id, "password_reset", ctx.ip);
   } catch (err) {
-    return failed("saving the new password", err);
+    return failed("ending sessions after the new password", err);
+  }
+  // A locked account (too many wrong passwords) can log in with the new password right away
+  try {
+    await serverSettings.unlockAccount(user.get("username"));
+    await sec.resetLimit(`login:${user.get("username")}`);   // and our own wrong-password count for this account
+  } catch (err) {
+    console.error("password reset: unlocking the account failed:", err && err.message ? err.message : "error");
   }
   await row.destroy(M);
   await destroyAll(await findAll("LoginChallenge", { user_id: user.id }));
