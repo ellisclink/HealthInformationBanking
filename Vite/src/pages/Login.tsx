@@ -36,6 +36,12 @@ function Login() {
     setMode(next); setError(""); setNotice(message);
   }
 
+  // Forget every password and code typed on this page. Called whenever they're no longer needed, so they don't sit in
+  // the page's memory: after logging in, when a login is abandoned or has to start over, and after a reset.
+  function forgetSecrets() {
+    setPassword(""); setCode(""); setResetCode(""); setNewPassword(""); setConfirmPassword("");
+  }
+
   async function handleLogin(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     // (used alert() before; errors now show inline like everything else)
@@ -58,10 +64,28 @@ function Login() {
       });
       // The code was right, so Parse now lets this email + password log in
       // (the beforeLogin check in Parse/cloud/lib/auth.js refuses it otherwise).
-      await Parse.User.logIn(email.trim().toLowerCase(), password);
-      setPassword("");
+      try {
+        await Parse.User.logIn(email.trim().toLowerCase(), password);
+      } catch {
+        // The code was right but Parse refused the login, which happens when more than 5 minutes passed after the code
+        forgetSecrets();
+        switchMode("login");
+        setError("That took too long. Please log in again.");
+        return;
+      }
+      forgetSecrets();
       navigate(dashboardPath(data.role));
-    } catch (err) { setError((err as Error).message); }
+    } catch (err) {
+      const message = (err as Error).message;
+      // The code is used up (expired, or too many wrong tries): start over from the password, and forget it here
+      if (/log in again/i.test(message)) {
+        forgetSecrets();
+        switchMode("login");
+      } else {
+        setCode("");
+      }
+      setError(message);
+    }
     finally { setBusy(false); }
   }
 
@@ -87,7 +111,7 @@ function Login() {
       const data = await api<{ message: string }>('/reset', {
         method: 'POST', body: JSON.stringify({ code: resetCode.trim(), newPassword }),
       });
-      setPassword("");
+      forgetSecrets();
       switchMode("login", data.message);
     } catch (err) { setError((err as Error).message); }
     finally { setBusy(false); }
@@ -111,7 +135,7 @@ function Login() {
                 value={code} onChange={e => setCode(e.target.value.replace(/\D/g, ""))} />
             </div>
             <button className="primary-button full-width" disabled={busy}>{busy ? "Verifying…" : "Verify and log in"}</button>
-            <button type="button" className="text-button" onClick={() => { setCode(""); switchMode("login"); }}>Back</button>
+            <button type="button" className="text-button" onClick={() => { forgetSecrets(); switchMode("login"); }}>Back</button>
           </form>
         )}
 
@@ -129,7 +153,7 @@ function Login() {
               {busy ? 'Signing in…' : 'Log In'}
             </button>
 
-            <button className="text-button" type="button" onClick={() => switchMode("forgot")}>
+            <button className="text-button" type="button" onClick={() => { forgetSecrets(); switchMode("forgot"); }}>
               Forgot Password?
             </button>
           </form>
